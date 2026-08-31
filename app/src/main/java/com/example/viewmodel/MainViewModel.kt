@@ -12,28 +12,20 @@ import com.example.data.model.ResolutionQuality
 import com.example.data.storage.HistoryRepository
 import com.example.data.storage.PdfStorageHelper
 import com.example.engine.DriveExtractorEngine
-import com.example.engine.ImageDownloader
-import com.example.engine.PdfCompiler
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
+import com.example.service.PdfDownloadService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.util.UUID
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val context = application.applicationContext
     private val historyRepository = HistoryRepository(context)
-    private val imageDownloader = ImageDownloader()
-    private val pdfCompiler = PdfCompiler()
 
     private var extractorEngine: DriveExtractorEngine? = null
-    private var downloadJob: Job? = null
 
     private val _downloadState = MutableStateFlow<DownloadState>(DownloadState.Idle)
     val downloadState: StateFlow<DownloadState> = _downloadState.asStateFlow()
@@ -55,6 +47,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val historyItems: StateFlow<List<DownloadHistoryItem>> = historyRepository.historyFlow
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    init {
+        // Collect background service state updates
+        viewModelScope.launch {
+            PdfDownloadService.downloadState.collect { serviceState ->
+                if (serviceState !is DownloadState.Idle) {
+                    _downloadState.value = serviceState
+                }
+            }
+        }
+    }
 
     fun updateUrl(url: String) {
         _inputUrl.value = url
@@ -80,6 +83,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         cancelDownload()
+        PdfDownloadService.resetState()
         _discoveredPages.value = emptyList()
         _currentDocumentTitle.value = null
         _downloadState.value = DownloadState.LoadingWebView(cleanUrl, "Connecting to document...")
@@ -118,15 +122,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         engine.onExtractionFinished = { pages, title ->
             _currentDocumentTitle.value = title ?: _currentDocumentTitle.value
-            executeDownloadAndCompile(pages, title)
+            // Launch Foreground Service for background downloading, PDF compiling & MediaStore export
+            PdfDownloadService.startDownload(
+                context = context,
+                pages = pages,
+                docTitle = title ?: _currentDocumentTitle.value
+            )
+            engine.destroy()
+            extractorEngine = null
         }
 
         engine.onError = { errorMsg ->
             _downloadState.value = DownloadState.Error(
                 message = errorMsg,
-                details = "Make sure the link is public or open Interactive Mode to sign in."
+                details = "Make sure the link is accessible or open Interactive Mode to sign in."
             )
             engine.destroy()
+            extractorEngine = null
         }
 
         engine.startExtraction(cleanUrl, _resolutionQuality.value)
@@ -136,99 +148,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         extractorEngine?.finishExtractionManually()
     }
 
-    private fun executeDownloadAndCompile(pages: List<Pair<Int, String>>, title: String?) {
-        downloadJob = viewModelScope.launch {
-            try {
-                val totalPages = pages.size
-                _downloadState.value = DownloadState.DownloadingImages(
-                    current = 0,
-                    total = totalPages,
-                    percent = 0f,
-                    message = "Starting concurrent download of $totalPages pages..."
-                )
-
-                // 1. Download images concurrently via OkHttp + Coroutines
-                val downloadedBitmaps = imageDownloader.downloadPageBitmaps(
-                    pages = pages,
-                    userAgent = DriveExtractorEngine.DESKTOP_USER_AGENT
-                ) { current, total ->
-                    _downloadState.value = DownloadState.DownloadingImages(
-                        current = current,
-                        total = total,
-                        percent = current.toFloat() / total.toFloat(),
-                        message = "Downloading page $current of $total..."
-                    )
-                }
-
-                if (downloadedBitmaps.isEmpty()) {
-                    _downloadState.value = DownloadState.Error("Failed to download page images.")
-                    return@launch
-                }
-
-                // 2. Native PDF Compilation via PdfDocument
-                _downloadState.value = DownloadState.CompilingPdf(
-                    currentPage = 0,
-                    totalPages = downloadedBitmaps.size,
-                    percent = 0f,
-                    message = "Compiling PDF document with native PDF engine..."
-                )
-
-                val pdfBytes = pdfCompiler.compilePdf(downloadedBitmaps) { current, total ->
-                    _downloadState.value = DownloadState.CompilingPdf(
-                        currentPage = current,
-                        totalPages = total,
-                        percent = current.toFloat() / total.toFloat(),
-                        message = "Rendering page $current of $total to PDF..."
-                    )
-                }
-
-                // 3. Save to Public Downloads via MediaStore
-                val finalFileName = PdfStorageHelper.generateFileName(title ?: _currentDocumentTitle.value)
-                val saveResult = PdfStorageHelper.savePdfToDownloads(context, pdfBytes, finalFileName)
-
-                val cacheFile = withContext(Dispatchers.IO) {
-                    PdfStorageHelper.saveToAppCache(context, pdfBytes, finalFileName)
-                }
-
-                saveResult.onSuccess { mediaStoreUri ->
-                    val historyItem = DownloadHistoryItem(
-                        id = UUID.randomUUID().toString(),
-                        title = title ?: finalFileName,
-                        uriString = mediaStoreUri.toString(),
-                        pageCount = pages.size,
-                        fileSizeBytes = pdfBytes.size.toLong(),
-                        timestamp = System.currentTimeMillis()
-                    )
-                    historyRepository.addItem(historyItem)
-
-                    _downloadState.value = DownloadState.Success(
-                        uri = mediaStoreUri,
-                        fileName = finalFileName,
-                        pageCount = pages.size,
-                        fileSizeBytes = pdfBytes.size.toLong(),
-                        localPath = cacheFile.absolutePath
-                    )
-                }.onFailure { error ->
-                    _downloadState.value = DownloadState.Error(
-                        message = "Failed to save PDF: ${error.localizedMessage}"
-                    )
-                }
-
-            } catch (e: Exception) {
-                Log.e("MainViewModel", "Download/Compile error", e)
-                _downloadState.value = DownloadState.Error("An error occurred: ${e.localizedMessage}")
-            } finally {
-                extractorEngine?.destroy()
-                extractorEngine = null
-            }
-        }
-    }
-
     fun cancelDownload() {
-        downloadJob?.cancel()
-        downloadJob = null
         extractorEngine?.destroy()
         extractorEngine = null
+        PdfDownloadService.cancelDownload(context)
+        PdfDownloadService.resetState()
         _downloadState.value = DownloadState.Idle
     }
 

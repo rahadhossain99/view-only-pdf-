@@ -31,6 +31,21 @@ class ExampleUnitTest {
   }
 
   @Test
+  fun testGenerateSessionPageUrls_45Pages() {
+    val sampleUrl = "https://drive.google.com/viewer/img?id=1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms&page=1&w=800"
+    val generated = DriveExtractorEngine.generateSessionPageUrls(sampleUrl, 45, ResolutionQuality.ULTRA)
+    
+    assertEquals(45, generated.size)
+    assertEquals(1, generated[0].first)
+    assertTrue(generated[0].second.contains("page=1"))
+    assertTrue(generated[0].second.contains("w=2560"))
+    
+    assertEquals(45, generated[44].first)
+    assertTrue(generated[44].second.contains("page=45"))
+    assertTrue(generated[44].second.contains("w=2560"))
+  }
+
+  @Test
   fun testGenerateFileName() {
     val fileName = PdfStorageHelper.generateFileName("Sample Research Paper")
     assertTrue(fileName.startsWith("Drive_Sample_Research_Paper_"))

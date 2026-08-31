@@ -34,6 +34,8 @@ class DriveExtractorEngine(
     private var currentResolution: ResolutionQuality = ResolutionQuality.ULTRA
     private var autoScrollJob: Job? = null
     private var isExtracting = false
+    private var sampleImageUrl: String? = null
+    private var hasTriggeredSessionGeneration = false
 
     var onStatusUpdate: ((message: String) -> Unit)? = null
     var onPagesDiscovered: ((count: Int, total: Int) -> Unit)? = null
@@ -68,7 +70,7 @@ class DriveExtractorEngine(
                 }
             }
 
-            // Fallback: If it's already a drive/docs URL, ensure it has /preview or embedded=true
+            // Fallback: If it's already a drive/docs URL, ensure it has /preview
             return if (trimmed.contains("drive.google.com") && trimmed.contains("/view")) {
                 trimmed.replace("/view", "/preview")
             } else {
@@ -116,6 +118,41 @@ class DriveExtractorEngine(
 
             return modified
         }
+
+        /**
+         * Session URL Generation:
+         * Given a captured image URL with a page parameter pattern and total page count,
+         * synthesizes URLs for all pages (1..totalPages) using the session base URL structure.
+         */
+        fun generateSessionPageUrls(
+            firstImageUrl: String,
+            totalPages: Int,
+            quality: ResolutionQuality
+        ): List<Pair<Int, String>> {
+            if (totalPages <= 0) return emptyList()
+
+            val pagePatterns = listOf(
+                Regex("([?&]page=)(\\d+)") to "$1",
+                Regex("([?&]pg=)(\\d+)") to "$1",
+                Regex("([?&]p=)(\\d+)") to "$1",
+                Regex("(page_)(\\d+)") to "$1",
+                Regex("(/page/)(\\d+)") to "$1"
+            )
+
+            for ((regex, prefix) in pagePatterns) {
+                if (regex.containsMatchIn(firstImageUrl)) {
+                    val result = mutableListOf<Pair<Int, String>>()
+                    for (i in 1..totalPages) {
+                        val replaced = firstImageUrl.replace(regex, "$prefix$i")
+                        val highRes = upgradeImageUrlResolution(replaced, quality)
+                        result.add(Pair(i, highRes))
+                    }
+                    return result
+                }
+            }
+
+            return emptyList()
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -128,6 +165,8 @@ class DriveExtractorEngine(
         capturedPages.clear()
         estimatedTotalPages = 0
         extractedTitle = null
+        sampleImageUrl = null
+        hasTriggeredSessionGeneration = false
         isExtracting = true
 
         val targetUrl = sanitizeDriveUrl(url)
@@ -188,7 +227,7 @@ class DriveExtractorEngine(
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                onStatusUpdate?.invoke("Document viewer loaded. Initializing page extraction...")
+                onStatusUpdate?.invoke("Document viewer loaded. Initializing automated auto-scroll...")
                 injectPageScraperScript(view)
             }
         }
@@ -197,13 +236,16 @@ class DriveExtractorEngine(
     }
 
     private fun handleInterceptedUrl(url: String) {
-        // Intercept drive viewer image URLs
         val isDriveImage = url.contains("drive.google.com/viewer/img") ||
                 url.contains("drive-viewer") ||
                 url.contains("googleusercontent.com/drive-viewer") ||
                 url.contains("drive.google.com/thumbnail")
 
         if (!isDriveImage) return
+
+        if (sampleImageUrl == null) {
+            sampleImageUrl = url
+        }
 
         // Extract page number from query params if present (e.g. ?id=...&page=3 or &pg=3)
         val uri = try { Uri.parse(url) } catch (e: Exception) { null }
@@ -223,16 +265,49 @@ class DriveExtractorEngine(
 
         onPagesDiscovered?.invoke(capturedPages.size, estimatedTotalPages)
         onStatusUpdate?.invoke("Discovered page $pageNumber (${capturedPages.size} total captured)")
+
+        // Check if we can trigger session URL generation
+        checkAndTriggerSessionUrlGeneration()
     }
 
+    private fun checkAndTriggerSessionUrlGeneration() {
+        val sample = sampleImageUrl ?: return
+        if (hasTriggeredSessionGeneration || estimatedTotalPages < 2) return
+
+        val synthesized = generateSessionPageUrls(sample, estimatedTotalPages, currentResolution)
+        if (synthesized.isNotEmpty() && synthesized.size >= estimatedTotalPages) {
+            hasTriggeredSessionGeneration = true
+            synthesized.forEach { (pNum, pUrl) ->
+                capturedPages[pNum] = pUrl
+            }
+            onPagesDiscovered?.invoke(capturedPages.size, estimatedTotalPages)
+            onStatusUpdate?.invoke("Auto-generated session URLs for all $estimatedTotalPages pages!")
+
+            // Short delay to allow any final metadata extraction, then complete
+            scope.launch(Dispatchers.Main) {
+                delay(600)
+                if (isActive && isExtracting) {
+                    completeExtraction()
+                }
+            }
+        }
+    }
+
+    /**
+     * Automated JavaScript Auto-Scroll Script:
+     * Systematically scrolls through Google Drive's virtualized DOM containers to trigger
+     * rendering of all lazy-loaded pages (e.g. 40+ pages) and captures page images and total count.
+     */
     private fun injectPageScraperScript(view: WebView?) {
         val jsScript = """
             (function() {
                 try {
-                    // Extract Document Title
+                    // 1. Extract Document Title
                     var title = document.title || "";
                     title = title.replace(" - Google Drive", "").replace(" - Google Docs", "").trim();
-                    var titleElem = document.querySelector('.ndfHFb-c4YZDc-s2gQvd') || document.querySelector('.drive-viewer-toolstrip-name');
+                    var titleElem = document.querySelector('.ndfHFb-c4YZDc-s2gQvd') || 
+                                    document.querySelector('.drive-viewer-toolstrip-name') ||
+                                    document.querySelector('.drive-viewer-title');
                     if (titleElem && titleElem.innerText) {
                         title = titleElem.innerText.trim();
                     }
@@ -240,35 +315,52 @@ class DriveExtractorEngine(
                         window.DriveBridge.onTitleFound(title);
                     }
 
-                    // Look for total page count in viewer UI
-                    var totalPages = 0;
-                    var pageCountElements = document.querySelectorAll('*');
-                    for (var i = 0; i < pageCountElements.length; i++) {
-                        var text = pageCountElements[i].innerText || "";
-                        var match = text.match(/(\d+)\s*\/\s*(\d+)/);
-                        if (match && parseInt(match[2]) > totalPages) {
-                            totalPages = parseInt(match[2]);
+                    // 2. Discover Total Pages from UI Indicators (e.g. '1 / 45' or 'Page 1 of 45')
+                    function scanTotalPages() {
+                        var totalPages = 0;
+                        var allElements = document.querySelectorAll('div, span, p, [role="status"], .drive-viewer-toolstrip-page-number');
+                        for (var i = 0; i < allElements.length; i++) {
+                            var text = (allElements[i].innerText || allElements[i].textContent || "").trim();
+                            if (text.length < 30) {
+                                var match = text.match(/(?:page\s*)?(\d+)\s*(?:\/|of)\s*(\d+)/i);
+                                if (match) {
+                                    var count = parseInt(match[2]);
+                                    if (count > totalPages && count < 2000) {
+                                        totalPages = count;
+                                    }
+                                }
+                            }
                         }
+
+                        // Also query page wrapper divs in DOM
+                        var pageDivs = document.querySelectorAll('.ndfHFb-c4YZDc-cYSp0e-DARUcf, .ndfHFb-c4YZDc-j7LFlb, div[role="region"], div[data-page-index], .drive-viewer-page');
+                        if (pageDivs.length > totalPages) {
+                            totalPages = pageDivs.length;
+                        }
+
+                        if (totalPages > 0) {
+                            window.DriveBridge.onTotalPagesEstimated(totalPages);
+                        }
+                        return totalPages;
                     }
 
-                    // Query all container page divs
-                    var pageContainers = document.querySelectorAll('.ndfHFb-c4YZDc-cYSp0e-DARUcf, .ndfHFb-c4YZDc-j7LFlb, div[role="region"], div[data-page-index]');
-                    if (pageContainers.length > totalPages) {
-                        totalPages = pageContainers.length;
-                    }
+                    scanTotalPages();
 
-                    window.DriveBridge.onTotalPagesEstimated(totalPages);
-
-                    // Scan current DOM for any rendered page images
+                    // 3. Scan DOM for currently rendered <img> elements
                     function scanImages() {
                         var imgs = document.querySelectorAll('img');
                         imgs.forEach(function(img, index) {
                             var src = img.src || img.getAttribute('src') || '';
-                            if (src && (src.indexOf('viewer/img') !== -1 || src.indexOf('drive-viewer') !== -1 || src.indexOf('googleusercontent') !== -1)) {
+                            if (src && (src.indexOf('viewer/img') !== -1 || 
+                                        src.indexOf('drive-viewer') !== -1 || 
+                                        src.indexOf('googleusercontent.com') !== -1 ||
+                                        src.indexOf('drive.google.com/thumbnail') !== -1)) {
                                 var pIndex = index + 1;
-                                var parentPage = img.closest('[data-page-index], [aria-label*="Page"], .ndfHFb-c4YZDc-cYSp0e-DARUcf');
+                                var parentPage = img.closest('[data-page-index], [aria-label*="Page"], .ndfHFb-c4YZDc-cYSp0e-DARUcf, .drive-viewer-page');
                                 if (parentPage) {
-                                    var label = parentPage.getAttribute('aria-label') || parentPage.getAttribute('data-page-index') || '';
+                                    var label = parentPage.getAttribute('aria-label') || 
+                                                parentPage.getAttribute('data-page-index') || 
+                                                parentPage.id || '';
                                     var numMatch = label.match(/\d+/);
                                     if (numMatch) {
                                         pIndex = parseInt(numMatch[0]);
@@ -281,31 +373,68 @@ class DriveExtractorEngine(
 
                     scanImages();
 
-                    // Find main scrollable element in Drive viewer
-                    var scrollContainer = document.querySelector('.ndfHFb-c4YZDc-bN97Pc') ||
-                                          document.querySelector('div[role="main"]') ||
-                                          document.querySelector('.drive-viewer-paginated-scrollable') ||
-                                          document.scrollingElement ||
-                                          document.body;
+                    // 4. Setup MutationObserver to immediately catch newly added images during virtualization
+                    var observer = new MutationObserver(function(mutations) {
+                        scanTotalPages();
+                        scanImages();
+                    });
+                    observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
 
-                    // Automated smooth scroll to trigger lazy loading of every page
+                    // 5. Automated Virtual Scroller: Finds all scrollable viewports
+                    function findScrollContainers() {
+                        var list = [document.scrollingElement, document.documentElement, document.body];
+                        var candidates = document.querySelectorAll('div, section, main, [role="main"]');
+                        candidates.forEach(function(el) {
+                            if (el.scrollHeight > el.clientHeight + 100 && el.clientHeight > 100) {
+                                list.push(el);
+                            }
+                        });
+                        return list;
+                    }
+
+                    var scrollables = findScrollContainers();
                     var currentScroll = 0;
-                    var maxScroll = scrollContainer.scrollHeight || document.body.scrollHeight || 5000;
-                    var scrollStep = window.innerHeight * 0.75;
-                    var scrollInterval = setInterval(function() {
+                    var scrollStep = 700;
+                    var idleCount = 0;
+                    var lastScrollHeight = document.body.scrollHeight;
+
+                    var scrollerInterval = setInterval(function() {
                         currentScroll += scrollStep;
-                        scrollContainer.scrollTop = currentScroll;
+                        scrollables = findScrollContainers();
+
+                        scrollables.forEach(function(s) {
+                            if (s) {
+                                s.scrollTop = currentScroll;
+                            }
+                        });
                         window.scrollBy(0, scrollStep);
+
+                        scanTotalPages();
                         scanImages();
 
-                        if (currentScroll >= (scrollContainer.scrollHeight || document.body.scrollHeight)) {
-                            clearInterval(scrollInterval);
+                        var maxScroll = Math.max(
+                            document.body.scrollHeight,
+                            document.documentElement.scrollHeight,
+                            ...scrollables.map(function(s) { return s ? s.scrollHeight : 0; })
+                        );
+
+                        if (maxScroll > lastScrollHeight) {
+                            lastScrollHeight = maxScroll;
+                            idleCount = 0;
+                        } else if (currentScroll >= maxScroll) {
+                            idleCount++;
+                        }
+
+                        // Stop when reached bottom or idle for 3 consecutive ticks past scroll limit
+                        if (idleCount >= 3 || currentScroll > 150000) {
+                            clearInterval(scrollerInterval);
+                            observer.disconnect();
                             setTimeout(function() {
                                 scanImages();
                                 window.DriveBridge.onScrollerFinished();
-                            }, 1200);
+                            }, 800);
                         }
-                    }, 400);
+                    }, 250);
 
                 } catch(e) {
                     window.DriveBridge.onJsError(e.toString());
@@ -360,6 +489,7 @@ class DriveExtractorEngine(
             if (total > estimatedTotalPages) {
                 estimatedTotalPages = total
                 onPagesDiscovered?.invoke(capturedPages.size, estimatedTotalPages)
+                checkAndTriggerSessionUrlGeneration()
             }
         }
 
@@ -370,11 +500,10 @@ class DriveExtractorEngine(
 
         @JavascriptInterface
         fun onScrollerFinished() {
-            onStatusUpdate?.invoke("Page scanning finished. Verifying captured pages...")
-            // Wait 1.5 seconds for in-flight requests before finishing
+            onStatusUpdate?.invoke("Automated scroll complete. Finalizing page interception...")
             scope.launch(Dispatchers.Main) {
-                delay(1500)
-                if (isActive) {
+                delay(1000)
+                if (isActive && isExtracting) {
                     completeExtraction()
                 }
             }
