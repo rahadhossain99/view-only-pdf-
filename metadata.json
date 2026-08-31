@@ -1,0 +1,6 @@
+{
+  "name": "Drive PDF Downloader",
+  "description": "Download protected and view-only Google Drive PDFs by intercepting high-resolution page images and compiling them into clean, native PDF documents.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

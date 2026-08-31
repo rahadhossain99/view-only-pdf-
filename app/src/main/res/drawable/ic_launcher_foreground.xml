@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Main PDF Paper Card -->
+    <path
+        android:fillColor="#F8FAFC"
+        android:pathData="M34,26 C31.8,26 30,27.8 30,30 L30,78 C30,80.2 31.8,82 34,82 L74,82 C76.2,82 78,80.2 78,78 L78,42 L62,26 L34,26 Z" />
+    
+    <!-- Paper folded corner -->
+    <path
+        android:fillColor="#E2E8F0"
+        android:pathData="M62,26 L78,42 L62,42 Z" />
+
+    <!-- PDF Banner / Badge -->
+    <path
+        android:fillColor="#EF4444"
+        android:pathData="M36,36 L58,36 C59.1,36 60,36.9 60,38 L60,48 C60,49.1 59.1,50 58,50 L36,50 C34.9,50 34,49.1 34,48 L34,38 C34,36.9 34.9,36 36,36 Z" />
+
+    <!-- "PDF" Text Indicator Lines -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M38,40 L44,40 C45.1,40 46,40.9 46,42 C46,43.1 45.1,44 44,44 L40,44 L40,47 L38,47 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M48,40 L52,40 C54.2,40 56,41.6 56,43.5 C56,45.4 54.2,47 52,47 L48,47 Z" />
+
+    <!-- Download Circle Badge -->
+    <path
+        android:fillColor="#2563EB"
+        android:pathData="M56,58 A16,16 0 1,0 88,58 A16,16 0 1,0 56,58 Z" />
+    
+    <!-- Download Arrow in Circle -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M72,50 L72,62 L67,57 L65,59 L72,66 L79,59 L77,57 L72,62 L72,50 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M65,68 L79,68 L79,70 L65,70 Z" />
+</vector>
