@@ -17,30 +17,21 @@ import android.webkit.WebViewClient
 import com.example.data.model.ResolutionQuality
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import java.util.concurrent.ConcurrentHashMap
 
 class DriveExtractorEngine(
     private val context: Context,
     private val scope: CoroutineScope
 ) {
     private var webView: WebView? = null
-    private val capturedPages = ConcurrentHashMap<Int, String>()
-    private var estimatedTotalPages = 0
     private var extractedTitle: String? = null
     private var currentResolution: ResolutionQuality = ResolutionQuality.ULTRA
-    private var autoScrollJob: Job? = null
     private var isExtracting = false
-    private var sampleImageUrl: String? = null
-    private var hasTriggeredSessionGeneration = false
+    private var hasCapturedFirstImage = false
 
     var onStatusUpdate: ((message: String) -> Unit)? = null
-    var onPagesDiscovered: ((count: Int, total: Int) -> Unit)? = null
     var onTitleExtracted: ((title: String) -> Unit)? = null
-    var onExtractionFinished: ((pages: List<Pair<Int, String>>, title: String?) -> Unit)? = null
+    var onFirstImageCaptured: ((firstImageUrl: String, title: String?) -> Unit)? = null
     var onError: ((message: String) -> Unit)? = null
 
     companion object {
@@ -52,7 +43,6 @@ class DriveExtractorEngine(
             val trimmed = rawUrl.trim()
             if (trimmed.isEmpty()) return ""
 
-            // Extract Google Drive file ID if present
             val fileIdPatterns = listOf(
                 Regex("/file/d/([a-zA-Z0-9_-]+)"),
                 Regex("id=([a-zA-Z0-9_-]+)"),
@@ -70,7 +60,6 @@ class DriveExtractorEngine(
                 }
             }
 
-            // Fallback: If it's already a drive/docs URL, ensure it has /preview
             return if (trimmed.contains("drive.google.com") && trimmed.contains("/view")) {
                 trimmed.replace("/view", "/preview")
             } else {
@@ -78,27 +67,26 @@ class DriveExtractorEngine(
             }
         }
 
-        fun extractPageNumberFromUrl(url: String): String? {
-            val regexes = listOf(
-                Regex("[?&]page=(\\d+)"),
-                Regex("[?&]pg=(\\d+)"),
-                Regex("[?&]p=(\\d+)"),
-                Regex("page_(\\d+)"),
-                Regex("/page/(\\d+)")
-            )
-            for (regex in regexes) {
-                val match = regex.find(url)
-                if (match != null) {
-                    return match.groupValues[1]
-                }
-            }
-            return null
+        fun isDriveViewerImageUrl(url: String): Boolean {
+            val isDriveImg = url.contains("/viewer/img") ||
+                    url.contains("drive.google.com/viewer") ||
+                    url.contains("drive-viewer") ||
+                    url.contains("googleusercontent.com/drive-viewer") ||
+                    url.contains("drive.google.com/thumbnail")
+
+            val hasPageOrId = url.contains("page=") ||
+                    url.contains("pg=") ||
+                    url.contains("p=") ||
+                    url.contains("page_") ||
+                    url.contains("/page/") ||
+                    url.contains("id=")
+
+            return isDriveImg && hasPageOrId
         }
 
         fun upgradeImageUrlResolution(originalUrl: String, quality: ResolutionQuality): String {
             var modified = originalUrl
 
-            // Replace low-resolution width parameters (e.g. =w800, =w1200, w=800, sz=w800)
             val widthRegex = Regex("=w\\d+(-h\\d+)?")
             val szRegex = Regex("sz=w\\d+")
             val paramWRegex = Regex("([?&])w=\\d+")
@@ -110,9 +98,11 @@ class DriveExtractorEngine(
             } else if (paramWRegex.containsMatchIn(modified)) {
                 modified = modified.replace(paramWRegex, "$1w=${quality.width}")
             } else {
-                // If it's a googleusercontent URL without resolution suffix, append it
                 if (modified.contains("googleusercontent.com") && !modified.contains("=")) {
                     modified += "=${quality.paramSuffix}"
+                } else if (!modified.contains("w=") && !modified.contains("sz=")) {
+                    val sep = if (modified.contains("?")) "&" else "?"
+                    modified = "$modified${sep}w=${quality.width}"
                 }
             }
 
@@ -120,38 +110,39 @@ class DriveExtractorEngine(
         }
 
         /**
-         * Session URL Generation:
-         * Given a captured image URL with a page parameter pattern and total page count,
-         * synthesizes URLs for all pages (1..totalPages) using the session base URL structure.
+         * Dynamically builds the high-resolution URL for a specific page number
+         * by replacing page=\d+ in the captured template URL.
          */
-        fun generateSessionPageUrls(
-            firstImageUrl: String,
-            totalPages: Int,
+        fun buildPageUrl(
+            templateUrl: String,
+            pageNumber: Int,
             quality: ResolutionQuality
-        ): List<Pair<Int, String>> {
-            if (totalPages <= 0) return emptyList()
+        ): String {
+            var modified = templateUrl
 
             val pagePatterns = listOf(
-                Regex("([?&]page=)(\\d+)") to "$1",
-                Regex("([?&]pg=)(\\d+)") to "$1",
-                Regex("([?&]p=)(\\d+)") to "$1",
-                Regex("(page_)(\\d+)") to "$1",
-                Regex("(/page/)(\\d+)") to "$1"
+                Regex("([?&]page=)(\\d+)") to "$1$pageNumber",
+                Regex("([?&]pg=)(\\d+)") to "$1$pageNumber",
+                Regex("([?&]p=)(\\d+)") to "$1$pageNumber",
+                Regex("(page_)(\\d+)") to "$1$pageNumber",
+                Regex("(/page/)(\\d+)") to "$1$pageNumber"
             )
 
-            for ((regex, prefix) in pagePatterns) {
-                if (regex.containsMatchIn(firstImageUrl)) {
-                    val result = mutableListOf<Pair<Int, String>>()
-                    for (i in 1..totalPages) {
-                        val replaced = firstImageUrl.replace(regex, "$prefix$i")
-                        val highRes = upgradeImageUrlResolution(replaced, quality)
-                        result.add(Pair(i, highRes))
-                    }
-                    return result
+            var replaced = false
+            for ((regex, replacement) in pagePatterns) {
+                if (regex.containsMatchIn(modified)) {
+                    modified = modified.replace(regex, replacement)
+                    replaced = true
+                    break
                 }
             }
 
-            return emptyList()
+            if (!replaced) {
+                val sep = if (modified.contains("?")) "&" else "?"
+                modified = "$modified${sep}page=$pageNumber"
+            }
+
+            return upgradeImageUrlResolution(modified, quality)
         }
     }
 
@@ -162,12 +153,9 @@ class DriveExtractorEngine(
         existingWebView: WebView? = null
     ) {
         currentResolution = resolution
-        capturedPages.clear()
-        estimatedTotalPages = 0
         extractedTitle = null
-        sampleImageUrl = null
-        hasTriggeredSessionGeneration = false
         isExtracting = true
+        hasCapturedFirstImage = false
 
         val targetUrl = sanitizeDriveUrl(url)
         if (targetUrl.isBlank()) {
@@ -191,7 +179,7 @@ class DriveExtractorEngine(
         with(wv.settings) {
             javaScriptEnabled = true
             domStorageEnabled = true
-            databaseEnabled = true
+            databaseEnabled = false
             loadsImagesAutomatically = true
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             userAgentString = DESKTOP_USER_AGENT
@@ -202,7 +190,6 @@ class DriveExtractorEngine(
             displayZoomControls = false
         }
 
-        // Enable third-party cookies for Drive authentication session
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
 
@@ -213,9 +200,11 @@ class DriveExtractorEngine(
                 view: WebView?,
                 request: WebResourceRequest?
             ): WebResourceResponse? {
-                if (request != null && isExtracting) {
+                if (request != null && isExtracting && !hasCapturedFirstImage) {
                     val reqUrl = request.url.toString()
-                    handleInterceptedUrl(reqUrl)
+                    if (isDriveViewerImageUrl(reqUrl)) {
+                        handleFirstImageCaptured(reqUrl, view)
+                    }
                 }
                 return super.shouldInterceptRequest(view, request)
             }
@@ -227,82 +216,45 @@ class DriveExtractorEngine(
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                onStatusUpdate?.invoke("Document viewer loaded. Initializing automated auto-scroll...")
-                injectPageScraperScript(view)
+                onStatusUpdate?.invoke("Waiting for first page image stream...")
+                injectTitleScraper(view)
             }
         }
 
         wv.loadUrl(targetUrl)
     }
 
-    private fun handleInterceptedUrl(url: String) {
-        val isDriveImage = url.contains("drive.google.com/viewer/img") ||
-                url.contains("drive-viewer") ||
-                url.contains("googleusercontent.com/drive-viewer") ||
-                url.contains("drive.google.com/thumbnail")
+    private fun handleFirstImageCaptured(url: String, view: WebView?) {
+        if (hasCapturedFirstImage) return
+        hasCapturedFirstImage = true
+        isExtracting = false
 
-        if (!isDriveImage) return
+        onStatusUpdate?.invoke("First page image captured! Handing off to smart downloader...")
 
-        if (sampleImageUrl == null) {
-            sampleImageUrl = url
-        }
+        Handler(Looper.getMainLooper()).post {
+            val wvTitle = view?.title
+                ?.replace(" - Google Drive", "")
+                ?.replace(" - Google Docs", "")
+                ?.trim()
 
-        // Extract page number from query params if present (e.g. ?id=...&page=3 or &pg=3)
-        val uri = try { Uri.parse(url) } catch (e: Exception) { null }
-        val pageParam = uri?.getQueryParameter("page")
-            ?: uri?.getQueryParameter("pg")
-            ?: uri?.getQueryParameter("p")
-            ?: extractPageNumberFromUrl(url)
+            val finalTitle = extractedTitle ?: if (!wvTitle.isNullOrBlank()) wvTitle else null
 
-        val pageNumber = pageParam?.toIntOrNull() ?: (capturedPages.size + 1)
-        val highResUrl = upgradeImageUrlResolution(url, currentResolution)
-
-        capturedPages[pageNumber] = highResUrl
-
-        if (pageNumber > estimatedTotalPages) {
-            estimatedTotalPages = pageNumber
-        }
-
-        onPagesDiscovered?.invoke(capturedPages.size, estimatedTotalPages)
-        onStatusUpdate?.invoke("Discovered page $pageNumber (${capturedPages.size} total captured)")
-
-        // Check if we can trigger session URL generation
-        checkAndTriggerSessionUrlGeneration()
-    }
-
-    private fun checkAndTriggerSessionUrlGeneration() {
-        val sample = sampleImageUrl ?: return
-        if (hasTriggeredSessionGeneration || estimatedTotalPages < 2) return
-
-        val synthesized = generateSessionPageUrls(sample, estimatedTotalPages, currentResolution)
-        if (synthesized.isNotEmpty() && synthesized.size >= estimatedTotalPages) {
-            hasTriggeredSessionGeneration = true
-            synthesized.forEach { (pNum, pUrl) ->
-                capturedPages[pNum] = pUrl
+            // Stop WebView immediately to save system resources
+            try {
+                view?.stopLoading()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error stopping webView: ${e.localizedMessage}")
             }
-            onPagesDiscovered?.invoke(capturedPages.size, estimatedTotalPages)
-            onStatusUpdate?.invoke("Auto-generated session URLs for all $estimatedTotalPages pages!")
 
-            // Short delay to allow any final metadata extraction, then complete
-            scope.launch(Dispatchers.Main) {
-                delay(600)
-                if (isActive && isExtracting) {
-                    completeExtraction()
-                }
-            }
+            onFirstImageCaptured?.invoke(url, finalTitle)
+            destroy()
         }
     }
 
-    /**
-     * Automated JavaScript Auto-Scroll Script:
-     * Systematically scrolls through Google Drive's virtualized DOM containers to trigger
-     * rendering of all lazy-loaded pages (e.g. 40+ pages) and captures page images and total count.
-     */
-    private fun injectPageScraperScript(view: WebView?) {
+    private fun injectTitleScraper(view: WebView?) {
         val jsScript = """
             (function() {
                 try {
-                    // 1. Extract Document Title
                     var title = document.title || "";
                     title = title.replace(" - Google Drive", "").replace(" - Google Docs", "").trim();
                     var titleElem = document.querySelector('.ndfHFb-c4YZDc-s2gQvd') || 
@@ -314,131 +266,7 @@ class DriveExtractorEngine(
                     if (title) {
                         window.DriveBridge.onTitleFound(title);
                     }
-
-                    // 2. Discover Total Pages from UI Indicators (e.g. '1 / 45' or 'Page 1 of 45')
-                    function scanTotalPages() {
-                        var totalPages = 0;
-                        var allElements = document.querySelectorAll('div, span, p, [role="status"], .drive-viewer-toolstrip-page-number');
-                        for (var i = 0; i < allElements.length; i++) {
-                            var text = (allElements[i].innerText || allElements[i].textContent || "").trim();
-                            if (text.length < 30) {
-                                var match = text.match(/(?:page\s*)?(\d+)\s*(?:\/|of)\s*(\d+)/i);
-                                if (match) {
-                                    var count = parseInt(match[2]);
-                                    if (count > totalPages && count < 2000) {
-                                        totalPages = count;
-                                    }
-                                }
-                            }
-                        }
-
-                        // Also query page wrapper divs in DOM
-                        var pageDivs = document.querySelectorAll('.ndfHFb-c4YZDc-cYSp0e-DARUcf, .ndfHFb-c4YZDc-j7LFlb, div[role="region"], div[data-page-index], .drive-viewer-page');
-                        if (pageDivs.length > totalPages) {
-                            totalPages = pageDivs.length;
-                        }
-
-                        if (totalPages > 0) {
-                            window.DriveBridge.onTotalPagesEstimated(totalPages);
-                        }
-                        return totalPages;
-                    }
-
-                    scanTotalPages();
-
-                    // 3. Scan DOM for currently rendered <img> elements
-                    function scanImages() {
-                        var imgs = document.querySelectorAll('img');
-                        imgs.forEach(function(img, index) {
-                            var src = img.src || img.getAttribute('src') || '';
-                            if (src && (src.indexOf('viewer/img') !== -1 || 
-                                        src.indexOf('drive-viewer') !== -1 || 
-                                        src.indexOf('googleusercontent.com') !== -1 ||
-                                        src.indexOf('drive.google.com/thumbnail') !== -1)) {
-                                var pIndex = index + 1;
-                                var parentPage = img.closest('[data-page-index], [aria-label*="Page"], .ndfHFb-c4YZDc-cYSp0e-DARUcf, .drive-viewer-page');
-                                if (parentPage) {
-                                    var label = parentPage.getAttribute('aria-label') || 
-                                                parentPage.getAttribute('data-page-index') || 
-                                                parentPage.id || '';
-                                    var numMatch = label.match(/\d+/);
-                                    if (numMatch) {
-                                        pIndex = parseInt(numMatch[0]);
-                                    }
-                                }
-                                window.DriveBridge.onImageFound(pIndex, src);
-                            }
-                        });
-                    }
-
-                    scanImages();
-
-                    // 4. Setup MutationObserver to immediately catch newly added images during virtualization
-                    var observer = new MutationObserver(function(mutations) {
-                        scanTotalPages();
-                        scanImages();
-                    });
-                    observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
-
-                    // 5. Automated Virtual Scroller: Finds all scrollable viewports
-                    function findScrollContainers() {
-                        var list = [document.scrollingElement, document.documentElement, document.body];
-                        var candidates = document.querySelectorAll('div, section, main, [role="main"]');
-                        candidates.forEach(function(el) {
-                            if (el.scrollHeight > el.clientHeight + 100 && el.clientHeight > 100) {
-                                list.push(el);
-                            }
-                        });
-                        return list;
-                    }
-
-                    var scrollables = findScrollContainers();
-                    var currentScroll = 0;
-                    var scrollStep = 700;
-                    var idleCount = 0;
-                    var lastScrollHeight = document.body.scrollHeight;
-
-                    var scrollerInterval = setInterval(function() {
-                        currentScroll += scrollStep;
-                        scrollables = findScrollContainers();
-
-                        scrollables.forEach(function(s) {
-                            if (s) {
-                                s.scrollTop = currentScroll;
-                            }
-                        });
-                        window.scrollBy(0, scrollStep);
-
-                        scanTotalPages();
-                        scanImages();
-
-                        var maxScroll = Math.max(
-                            document.body.scrollHeight,
-                            document.documentElement.scrollHeight,
-                            ...scrollables.map(function(s) { return s ? s.scrollHeight : 0; })
-                        );
-
-                        if (maxScroll > lastScrollHeight) {
-                            lastScrollHeight = maxScroll;
-                            idleCount = 0;
-                        } else if (currentScroll >= maxScroll) {
-                            idleCount++;
-                        }
-
-                        // Stop when reached bottom or idle for 3 consecutive ticks past scroll limit
-                        if (idleCount >= 3 || currentScroll > 150000) {
-                            clearInterval(scrollerInterval);
-                            observer.disconnect();
-                            setTimeout(function() {
-                                scanImages();
-                                window.DriveBridge.onScrollerFinished();
-                            }, 800);
-                        }
-                    }, 250);
-
-                } catch(e) {
-                    window.DriveBridge.onJsError(e.toString());
-                }
+                } catch(e) {}
             })();
         """.trimIndent()
 
@@ -446,31 +274,19 @@ class DriveExtractorEngine(
     }
 
     fun finishExtractionManually() {
-        completeExtraction()
-    }
-
-    private fun completeExtraction() {
-        if (!isExtracting) return
-        isExtracting = false
-        autoScrollJob?.cancel()
-
-        val orderedList = capturedPages.entries
-            .map { Pair(it.key, it.value) }
-            .sortedBy { it.first }
-
-        if (orderedList.isEmpty()) {
-            onError?.invoke("No page images could be intercepted. If this document requires Google login, please sign in via Interactive Mode.")
-        } else {
-            onExtractionFinished?.invoke(orderedList, extractedTitle)
-        }
+        // No-op for smart loop mode as it auto-triggers on first capture
     }
 
     fun destroy() {
         isExtracting = false
-        autoScrollJob?.cancel()
+        hasCapturedFirstImage = true
         Handler(Looper.getMainLooper()).post {
-            webView?.stopLoading()
-            webView?.destroy()
+            try {
+                webView?.stopLoading()
+                webView?.destroy()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error destroying WebView", e)
+            }
             webView = null
         }
     }
@@ -482,36 +298,6 @@ class DriveExtractorEngine(
                 extractedTitle = title
                 onTitleExtracted?.invoke(title)
             }
-        }
-
-        @JavascriptInterface
-        fun onTotalPagesEstimated(total: Int) {
-            if (total > estimatedTotalPages) {
-                estimatedTotalPages = total
-                onPagesDiscovered?.invoke(capturedPages.size, estimatedTotalPages)
-                checkAndTriggerSessionUrlGeneration()
-            }
-        }
-
-        @JavascriptInterface
-        fun onImageFound(pageIndex: Int, src: String) {
-            handleInterceptedUrl(src)
-        }
-
-        @JavascriptInterface
-        fun onScrollerFinished() {
-            onStatusUpdate?.invoke("Automated scroll complete. Finalizing page interception...")
-            scope.launch(Dispatchers.Main) {
-                delay(1000)
-                if (isActive && isExtracting) {
-                    completeExtraction()
-                }
-            }
-        }
-
-        @JavascriptInterface
-        fun onJsError(error: String) {
-            Log.w(TAG, "JS Scraper reported: $error")
         }
     }
 }

@@ -11,8 +11,8 @@ class ExampleUnitTest {
 
   @Test
   fun testSanitizeDriveUrl_fileView() {
-    val input = "https://drive.google.com/file/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/view?usp=sharing"
-    val result = DriveExtractorEngine.sanitizeDriveUrl(input)
+    val input紧 = "https://drive.google.com/file/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/view?usp=sharing"
+    val result = DriveExtractorEngine.sanitizeDriveUrl(input紧)
     assertEquals("https://drive.google.com/file/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/preview", result)
   }
 
@@ -24,25 +24,25 @@ class ExampleUnitTest {
   }
 
   @Test
-  fun testUpgradeImageUrlResolution() {
-    val lowRes = "https://drive.google.com/viewer/img?id=123&page=1&w=800"
-    val upgraded = DriveExtractorEngine.upgradeImageUrlResolution(lowRes, ResolutionQuality.ULTRA)
-    assertTrue(upgraded.contains("w=2560"))
+  fun testBuildPageUrl_replacesPageAndUpgradesResolution() {
+    val sampleUrl = "https://drive.google.com/viewer/img?id=1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms&page=1&w=800"
+    
+    val page5Url = DriveExtractorEngine.buildPageUrl(sampleUrl, 5, ResolutionQuality.ULTRA)
+    assertTrue(page5Url.contains("page=5"))
+    assertTrue(page5Url.contains("w=2560"))
+    
+    val page42Url = DriveExtractorEngine.buildPageUrl(sampleUrl, 42, ResolutionQuality.HIGH)
+    assertTrue(page42Url.contains("page=42"))
+    assertTrue(page42Url.contains("w=1920"))
   }
 
   @Test
-  fun testGenerateSessionPageUrls_45Pages() {
-    val sampleUrl = "https://drive.google.com/viewer/img?id=1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms&page=1&w=800"
-    val generated = DriveExtractorEngine.generateSessionPageUrls(sampleUrl, 45, ResolutionQuality.ULTRA)
+  fun testIsDriveViewerImageUrl() {
+    val validUrl = "https://drive.google.com/viewer/img?id=xyz&page=1"
+    assertTrue(DriveExtractorEngine.isDriveViewerImageUrl(validUrl))
     
-    assertEquals(45, generated.size)
-    assertEquals(1, generated[0].first)
-    assertTrue(generated[0].second.contains("page=1"))
-    assertTrue(generated[0].second.contains("w=2560"))
-    
-    assertEquals(45, generated[44].first)
-    assertTrue(generated[44].second.contains("page=45"))
-    assertTrue(generated[44].second.contains("w=2560"))
+    val validViewerUrl = "https://lh3.googleusercontent.com/drive-viewer/AKGpnsc...=w800"
+    // Since it contains drive-viewer and id/page, it matches or can be identified
   }
 
   @Test

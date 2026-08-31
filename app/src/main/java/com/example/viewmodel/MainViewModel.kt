@@ -2,7 +2,6 @@ package com.example.viewmodel
 
 import android.app.Application
 import android.net.Uri
-import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.model.DownloadHistoryItem
@@ -95,7 +94,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val currentState = _downloadState.value
             if (currentState is DownloadState.LoadingWebView) {
                 _downloadState.value = currentState.copy(message = msg)
-            } else if (currentState is DownloadState.InterceptingPages) {
+            } else if (currentState is DownloadState.CompilingPdf) {
                 _downloadState.value = currentState.copy(message = msg)
             }
         }
@@ -104,29 +103,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _currentDocumentTitle.value = title
         }
 
-        engine.onPagesDiscovered = { capturedCount, estimatedTotal ->
-            val pagesList = (1..capturedCount).map { index ->
-                PageItem(
-                    pageNumber = index,
-                    imageUrl = "",
-                    highResUrl = ""
-                )
-            }
-            _discoveredPages.value = pagesList
-            _downloadState.value = DownloadState.InterceptingPages(
-                capturedCount = capturedCount,
-                estimatedTotal = estimatedTotal.coerceAtLeast(capturedCount),
-                message = "Intercepted $capturedCount pages..."
+        // Smart loop trigger: as soon as first page URL is captured, stop WebView and hand off to Foreground Service
+        engine.onFirstImageCaptured = { firstUrl, title ->
+            val docTitle = title ?: _currentDocumentTitle.value
+            _currentDocumentTitle.value = docTitle
+            _downloadState.value = DownloadState.CompilingPdf(
+                currentPage = 1,
+                totalPages = 1,
+                percent = 0f,
+                message = "Starting smart loop download..."
             )
-        }
-
-        engine.onExtractionFinished = { pages, title ->
-            _currentDocumentTitle.value = title ?: _currentDocumentTitle.value
-            // Launch Foreground Service for background downloading, PDF compiling & MediaStore export
             PdfDownloadService.startDownload(
                 context = context,
-                pages = pages,
-                docTitle = title ?: _currentDocumentTitle.value
+                firstImageUrl = firstUrl,
+                docTitle = docTitle,
+                resolution = _resolutionQuality.value
             )
             engine.destroy()
             extractorEngine = null
@@ -145,7 +136,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun forceFinishExtraction() {
-        extractorEngine?.finishExtractionManually()
+        // No-op in smart loop mode
     }
 
     fun cancelDownload() {
