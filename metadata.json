@@ -1,6 +1,6 @@
 {
   "name": "Drive PDF Downloader",
-  "description": "Download protected and view-only Google Drive PDFs by intercepting high-resolution page images and compiling them into clean, native PDF documents.",
+  "description": "Auto-scroll and capture page-by-page screenshots or high-res rendered pages of protected Google Drive documents and compile them directly into native PDF files.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

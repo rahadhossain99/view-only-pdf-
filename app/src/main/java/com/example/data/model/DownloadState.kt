@@ -2,6 +2,7 @@ package com.example.data.model
 
 import android.net.Uri
 import android.graphics.Bitmap
+import java.util.UUID
 
 sealed interface DownloadState {
     object Idle : DownloadState
@@ -54,12 +55,12 @@ data class PageItem(
 )
 
 data class DownloadHistoryItem(
-    val id: String,
+    val id: String = UUID.randomUUID().toString(),
     val title: String,
     val uriString: String,
     val pageCount: Int,
     val fileSizeBytes: Long,
-    val timestamp: Long
+    val timestamp: Long = System.currentTimeMillis()
 )
 
 enum class ResolutionQuality(val label: String, val paramSuffix: String, val width: Int) {

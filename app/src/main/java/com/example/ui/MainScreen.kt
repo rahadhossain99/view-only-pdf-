@@ -57,6 +57,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.data.model.DownloadState
+import com.example.ui.components.AutoScreenshotStudioDialog
 import com.example.ui.components.HistorySection
 import com.example.ui.components.InteractiveWebViewSheet
 import com.example.ui.components.ProgressCard
@@ -74,6 +75,7 @@ fun MainScreen(
     val inputUrl by viewModel.inputUrl.collectAsState()
     val resolutionQuality by viewModel.resolutionQuality.collectAsState()
     val isInteractiveMode by viewModel.isInteractiveMode.collectAsState()
+    val isScreenshotStudioOpen by viewModel.isScreenshotStudioOpen.collectAsState()
     val documentTitle by viewModel.currentDocumentTitle.collectAsState()
     val historyItems by viewModel.historyItems.collectAsState()
 
@@ -152,7 +154,8 @@ fun MainScreen(
                     selectedResolution = resolutionQuality,
                     onResolutionChange = { viewModel.setResolution(it) },
                     onStartDownload = { viewModel.startDownload() },
-                    onToggleInteractiveMode = { viewModel.setInteractiveMode(true) }
+                    onToggleInteractiveMode = { viewModel.setInteractiveMode(true) },
+                    onOpenScreenshotStudio = { viewModel.setScreenshotStudioOpen(true) }
                 )
             }
 
@@ -223,6 +226,17 @@ fun MainScreen(
             onStartAutoExtraction = {
                 viewModel.setInteractiveMode(false)
                 viewModel.startDownload()
+            }
+        )
+    }
+
+    // Dedicated Auto-Scroll Screenshot to PDF Studio
+    if (isScreenshotStudioOpen) {
+        AutoScreenshotStudioDialog(
+            url = inputUrl.ifBlank { "https://drive.google.com" },
+            onDismiss = { viewModel.setScreenshotStudioOpen(false) },
+            onPdfCreated = { uri, fileName, pageCount ->
+                viewModel.setScreenshotStudioOpen(false)
             }
         )
     }

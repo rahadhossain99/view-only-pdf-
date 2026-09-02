@@ -47,6 +47,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isInteractiveMode = MutableStateFlow(false)
     val isInteractiveMode: StateFlow<Boolean> = _isInteractiveMode.asStateFlow()
 
+    private val _isScreenshotStudioOpen = MutableStateFlow(false)
+    val isScreenshotStudioOpen: StateFlow<Boolean> = _isScreenshotStudioOpen.asStateFlow()
+
     private val _currentDocumentTitle = MutableStateFlow<String?>(null)
     val currentDocumentTitle: StateFlow<String?> = _currentDocumentTitle.asStateFlow()
 
@@ -80,6 +83,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setInteractiveMode(enabled: Boolean) {
         _isInteractiveMode.value = enabled
+    }
+
+    fun setScreenshotStudioOpen(open: Boolean) {
+        _isScreenshotStudioOpen.value = open
     }
 
     fun setSampleUrl() {
