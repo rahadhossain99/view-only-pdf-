@@ -3,7 +3,6 @@ package com.example.engine
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
-import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -18,6 +17,8 @@ import com.example.data.model.ResolutionQuality
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import java.util.Collections
+import java.util.concurrent.ConcurrentSkipListMap
 
 class DriveExtractorEngine(
     private val context: Context,
@@ -27,11 +28,17 @@ class DriveExtractorEngine(
     private var extractedTitle: String? = null
     private var currentResolution: ResolutionQuality = ResolutionQuality.ULTRA
     private var isExtracting = false
-    private var hasCapturedFirstImage = false
+
+    private val capturedPagesMap = ConcurrentSkipListMap<Int, String>()
+    private val capturedUrlsSet = Collections.synchronizedSet(HashSet<String>())
+    private var mainHandler = Handler(Looper.getMainLooper())
+    private var finishDebounceRunnable: Runnable? = null
+    private var isScrollCompleted = false
 
     var onStatusUpdate: ((message: String) -> Unit)? = null
     var onTitleExtracted: ((title: String) -> Unit)? = null
-    var onFirstImageCaptured: ((firstImageUrl: String, title: String?) -> Unit)? = null
+    var onPageDiscovered: ((pageNumber: Int, highResUrl: String, totalCaptured: Int) -> Unit)? = null
+    var onExtractionCompleted: ((pageUrls: List<String>, title: String?, baseTemplateUrl: String?) -> Unit)? = null
     var onError: ((message: String) -> Unit)? = null
 
     companion object {
@@ -39,10 +46,8 @@ class DriveExtractorEngine(
         const val DESKTOP_USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-        fun sanitizeDriveUrl(rawUrl: String): String {
+        fun extractFileId(rawUrl: String): String? {
             val trimmed = rawUrl.trim()
-            if (trimmed.isEmpty()) return ""
-
             val fileIdPatterns = listOf(
                 Regex("/file/d/([a-zA-Z0-9_-]+)"),
                 Regex("id=([a-zA-Z0-9_-]+)"),
@@ -55,9 +60,19 @@ class DriveExtractorEngine(
             for (pattern in fileIdPatterns) {
                 val match = pattern.find(trimmed)
                 if (match != null) {
-                    val fileId = match.groupValues[1]
-                    return "https://drive.google.com/file/d/$fileId/preview"
+                    return match.groupValues[1]
                 }
+            }
+            return null
+        }
+
+        fun sanitizeDriveUrl(rawUrl: String): String {
+            val trimmed = rawUrl.trim()
+            if (trimmed.isEmpty()) return ""
+
+            val fileId = extractFileId(trimmed)
+            if (fileId != null) {
+                return "https://drive.google.com/file/d/$fileId/preview"
             }
 
             return if (trimmed.contains("drive.google.com") && trimmed.contains("/view")) {
@@ -68,20 +83,43 @@ class DriveExtractorEngine(
         }
 
         fun isDriveViewerImageUrl(url: String): Boolean {
-            val isDriveImg = url.contains("/viewer/img") ||
-                    url.contains("drive.google.com/viewer") ||
-                    url.contains("drive-viewer") ||
-                    url.contains("googleusercontent.com/drive-viewer") ||
-                    url.contains("drive.google.com/thumbnail")
+            val lower = url.lowercase()
+            val isDriveOrGoogle = lower.contains("drive.google.com") ||
+                    lower.contains("docs.google.com") ||
+                    lower.contains("googleusercontent.com")
 
-            val hasPageOrId = url.contains("page=") ||
-                    url.contains("pg=") ||
-                    url.contains("p=") ||
-                    url.contains("page_") ||
-                    url.contains("/page/") ||
-                    url.contains("id=")
+            val isViewerPath = lower.contains("/viewer") ||
+                    lower.contains("drive-viewer") ||
+                    lower.contains("/thumbnail") ||
+                    lower.contains("sz=w") ||
+                    lower.contains("=w")
 
-            return isDriveImg && hasPageOrId
+            val isUiAsset = lower.contains("cleardot.gif") ||
+                    lower.contains("drive_icon") ||
+                    lower.contains("photos/private") ||
+                    lower.contains("default-avatar") ||
+                    lower.contains(".svg") ||
+                    lower.contains(".ico")
+
+            return isDriveOrGoogle && isViewerPath && !isUiAsset
+        }
+
+        fun extractPageNumberFromUrl(url: String): Int? {
+            val pagePatterns = listOf(
+                Regex("[?&]page=(\\d+)"),
+                Regex("[?&]pg=(\\d+)"),
+                Regex("[?&]p=(\\d+)"),
+                Regex("page_(\\d+)"),
+                Regex("/page/(\\d+)")
+            )
+
+            for (pattern in pagePatterns) {
+                val match = pattern.find(url)
+                if (match != null) {
+                    return match.groupValues[1].toIntOrNull()
+                }
+            }
+            return null
         }
 
         fun upgradeImageUrlResolution(originalUrl: String, quality: ResolutionQuality): String {
@@ -109,10 +147,6 @@ class DriveExtractorEngine(
             return modified
         }
 
-        /**
-         * Dynamically builds the high-resolution URL for a specific page number
-         * by replacing page=\d+ in the captured template URL.
-         */
         fun buildPageUrl(
             templateUrl: String,
             pageNumber: Int,
@@ -155,7 +189,10 @@ class DriveExtractorEngine(
         currentResolution = resolution
         extractedTitle = null
         isExtracting = true
-        hasCapturedFirstImage = false
+        isScrollCompleted = false
+        capturedPagesMap.clear()
+        capturedUrlsSet.clear()
+        cancelFinishDebounce()
 
         val targetUrl = sanitizeDriveUrl(url)
         if (targetUrl.isBlank()) {
@@ -163,7 +200,7 @@ class DriveExtractorEngine(
             return
         }
 
-        Handler(Looper.getMainLooper()).post {
+        mainHandler.post {
             try {
                 val wv = existingWebView ?: WebView(context).also { webView = it }
                 setupWebView(wv, targetUrl)
@@ -179,7 +216,7 @@ class DriveExtractorEngine(
         with(wv.settings) {
             javaScriptEnabled = true
             domStorageEnabled = true
-            databaseEnabled = false
+            databaseEnabled = true
             loadsImagesAutomatically = true
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             userAgentString = DESKTOP_USER_AGENT
@@ -200,10 +237,11 @@ class DriveExtractorEngine(
                 view: WebView?,
                 request: WebResourceRequest?
             ): WebResourceResponse? {
-                if (request != null && isExtracting && !hasCapturedFirstImage) {
+                if (request != null && isExtracting) {
                     val reqUrl = request.url.toString()
                     if (isDriveViewerImageUrl(reqUrl)) {
-                        handleFirstImageCaptured(reqUrl, view)
+                        val pageNum = extractPageNumberFromUrl(reqUrl)
+                        handleImageDiscovered(reqUrl, pageNum)
                     }
                 }
                 return super.shouldInterceptRequest(view, request)
@@ -216,38 +254,101 @@ class DriveExtractorEngine(
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                onStatusUpdate?.invoke("Waiting for first page image stream...")
+                onStatusUpdate?.invoke("Document viewer loaded. Scrolling to capture all pages...")
                 injectTitleScraper(view)
+                injectAutoScroller(view)
+
+                // Safety timeout: if after 15 seconds we have at least 1 page, trigger compile
+                mainHandler.postDelayed({
+                    if (isExtracting && capturedPagesMap.isNotEmpty()) {
+                        Log.d(TAG, "Safety timer fired, triggering completion with ${capturedPagesMap.size} pages")
+                        triggerCompletion()
+                    }
+                }, 15000)
             }
         }
 
         wv.loadUrl(targetUrl)
     }
 
-    private fun handleFirstImageCaptured(url: String, view: WebView?) {
-        if (hasCapturedFirstImage) return
-        hasCapturedFirstImage = true
+    @Synchronized
+    private fun handleImageDiscovered(rawUrl: String, detectedPageNum: Int?) {
+        if (!isExtracting) return
+
+        val cleanBaseUrl = rawUrl.substringBefore("=w").substringBefore("sz=w")
+        if (capturedUrlsSet.contains(cleanBaseUrl)) {
+            return
+        }
+        capturedUrlsSet.add(cleanBaseUrl)
+
+        val highResUrl = upgradeImageUrlResolution(rawUrl, currentResolution)
+
+        val pageNumber = if (detectedPageNum != null && detectedPageNum > 0) {
+            detectedPageNum
+        } else if (detectedPageNum == 0) {
+            1
+        } else {
+            // Sequential ordering
+            val maxKey = capturedPagesMap.keys.maxOrNull() ?: 0
+            maxKey + 1
+        }
+
+        capturedPagesMap[pageNumber] = highResUrl
+        val currentTotal = capturedPagesMap.size
+
+        mainHandler.post {
+            onPageDiscovered?.invoke(pageNumber, highResUrl, currentTotal)
+            onStatusUpdate?.invoke("Captured page $pageNumber (Total: $currentTotal pages detected)...")
+        }
+
+        // Debounce: if no new pages are captured within 3.5 seconds and scroll completed, or 5 seconds otherwise
+        val debounceDelay = if (isScrollCompleted) 2000L else 4000L
+        scheduleFinishDebounce(debounceDelay)
+    }
+
+    private fun scheduleFinishDebounce(delayMs: Long) {
+        cancelFinishDebounce()
+        finishDebounceRunnable = Runnable {
+            if (isExtracting && capturedPagesMap.isNotEmpty()) {
+                Log.d(TAG, "Debounce timer expired, auto-completing with ${capturedPagesMap.size} pages")
+                triggerCompletion()
+            }
+        }
+        mainHandler.postDelayed(finishDebounceRunnable!!, delayMs)
+    }
+
+    private fun cancelFinishDebounce() {
+        finishDebounceRunnable?.let { mainHandler.removeCallbacks(it) }
+        finishDebounceRunnable = null
+    }
+
+    private fun triggerCompletion() {
+        if (!isExtracting) return
         isExtracting = false
+        cancelFinishDebounce()
 
-        onStatusUpdate?.invoke("First page image captured! Handing off to smart downloader...")
+        val pagesList = capturedPagesMap.values.toList()
+        val firstUrl = pagesList.firstOrNull()
 
-        Handler(Looper.getMainLooper()).post {
-            val wvTitle = view?.title
+        // Flush cookies to OkHttp
+        CookieManager.getInstance().flush()
+
+        mainHandler.post {
+            val title = extractedTitle ?: webView?.title
                 ?.replace(" - Google Drive", "")
                 ?.replace(" - Google Docs", "")
                 ?.trim()
 
-            val finalTitle = extractedTitle ?: if (!wvTitle.isNullOrBlank()) wvTitle else null
-
-            // Stop WebView immediately to save system resources
-            try {
-                view?.stopLoading()
-            } catch (e: Exception) {
-                Log.w(TAG, "Error stopping webView: ${e.localizedMessage}")
-            }
-
-            onFirstImageCaptured?.invoke(url, finalTitle)
+            onExtractionCompleted?.invoke(pagesList, title, firstUrl)
             destroy()
+        }
+    }
+
+    fun forceCompileNow() {
+        if (capturedPagesMap.isNotEmpty()) {
+            triggerCompletion()
+        } else {
+            onError?.invoke("No document pages have been captured yet. Please wait a moment.")
         }
     }
 
@@ -273,14 +374,79 @@ class DriveExtractorEngine(
         view?.evaluateJavascript(jsScript, null)
     }
 
-    fun finishExtractionManually() {
-        // No-op for smart loop mode as it auto-triggers on first capture
+    private fun injectAutoScroller(view: WebView?) {
+        val jsScript = """
+            (function() {
+                if (window._driveAutoScrollerActive) return;
+                window._driveAutoScrollerActive = true;
+
+                function findScrollElement() {
+                    return document.querySelector('.drive-viewer-paginated-scrollable') || 
+                           document.querySelector('.ndfHFb-c4YZDc-bN97Pc') ||
+                           document.querySelector('.drive-viewer-content') ||
+                           document.documentElement || 
+                           document.body;
+                }
+
+                function scrapeDomImages() {
+                    var imgs = document.querySelectorAll('img');
+                    for (var i = 0; i < imgs.length; i++) {
+                        var img = imgs[i];
+                        var src = img.src || img.getAttribute('src') || img.getAttribute('data-src');
+                        if (src && (src.indexOf('viewer') !== -1 || src.indexOf('googleusercontent') !== -1 || src.indexOf('drive') !== -1)) {
+                            var pageIdx = -1;
+                            var parent = img.closest('[data-page-index], [data-page-number], .drive-viewer-paginated-page');
+                            if (parent) {
+                                var idx = parent.getAttribute('data-page-index') || parent.getAttribute('data-page-number');
+                                if (idx) pageIdx = parseInt(idx, 10);
+                            }
+                            if (window.DriveBridge && window.DriveBridge.onPageImageFound) {
+                                window.DriveBridge.onPageImageFound(src, pageIdx);
+                            }
+                        }
+                    }
+                }
+
+                var stagnantCycles = 0;
+                var lastScroll = -1;
+                var scrollTimer = setInterval(function() {
+                    var el = findScrollElement();
+                    scrapeDomImages();
+
+                    var curScroll = el.scrollTop || window.pageYOffset || 0;
+                    var maxScroll = (el.scrollHeight || document.body.scrollHeight) - (el.clientHeight || window.innerHeight);
+
+                    if (curScroll === lastScroll || (maxScroll > 0 && curScroll >= maxScroll - 40)) {
+                        stagnantCycles++;
+                        if (stagnantCycles >= 4) {
+                            clearInterval(scrollTimer);
+                            scrapeDomImages();
+                            if (window.DriveBridge && window.DriveBridge.onScrollFinished) {
+                                window.DriveBridge.onScrollFinished();
+                            }
+                        }
+                    } else {
+                        stagnantCycles = 0;
+                    }
+                    lastScroll = curScroll;
+
+                    var step = Math.max(350, (el.clientHeight || window.innerHeight) * 0.75);
+                    if (el.scrollTop !== undefined && el.scrollHeight > el.clientHeight) {
+                        el.scrollTop = curScroll + step;
+                    } else {
+                        window.scrollBy(0, step);
+                    }
+                }, 350);
+            })();
+        """.trimIndent()
+
+        view?.evaluateJavascript(jsScript, null)
     }
 
     fun destroy() {
         isExtracting = false
-        hasCapturedFirstImage = true
-        Handler(Looper.getMainLooper()).post {
+        cancelFinishDebounce()
+        mainHandler.post {
             try {
                 webView?.stopLoading()
                 webView?.destroy()
@@ -294,9 +460,25 @@ class DriveExtractorEngine(
     private inner class DriveJsBridge {
         @JavascriptInterface
         fun onTitleFound(title: String) {
-            if (!title.isBlank() && extractedTitle == null) {
+            if (title.isNotBlank() && extractedTitle == null) {
                 extractedTitle = title
                 onTitleExtracted?.invoke(title)
+            }
+        }
+
+        @JavascriptInterface
+        fun onPageImageFound(url: String, pageIndex: Int) {
+            if (url.isNotBlank() && isDriveViewerImageUrl(url)) {
+                handleImageDiscovered(url, if (pageIndex >= 0) pageIndex + 1 else null)
+            }
+        }
+
+        @JavascriptInterface
+        fun onScrollFinished() {
+            Log.d(TAG, "JS reported scroll finished. Captured count: ${capturedPagesMap.size}")
+            isScrollCompleted = true
+            if (capturedPagesMap.isNotEmpty()) {
+                scheduleFinishDebounce(1000L)
             }
         }
     }

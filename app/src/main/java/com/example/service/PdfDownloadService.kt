@@ -34,6 +34,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -66,29 +67,64 @@ class PdfDownloadService : Service() {
         const val NOTIFICATION_ID_PROGRESS = 1001
         const val NOTIFICATION_ID_COMPLETE = 1002
 
-        const val ACTION_START = "com.example.action.START_DOWNLOAD"
+        const val ACTION_START_WITH_URLS = "com.example.action.START_WITH_URLS"
+        const val ACTION_START_PROBE = "com.example.action.START_PROBE"
+        const val ACTION_START_DIRECT = "com.example.action.START_DIRECT"
         const val ACTION_CANCEL = "com.example.action.CANCEL_DOWNLOAD"
 
+        const val EXTRA_PAGE_URLS = "extra_page_urls"
         const val EXTRA_FIRST_IMAGE_URL = "extra_first_image_url"
+        const val EXTRA_DIRECT_URL = "extra_direct_url"
         const val EXTRA_DOC_TITLE = "extra_doc_title"
         const val EXTRA_RESOLUTION_NAME = "extra_resolution_name"
 
         private val _downloadState = MutableStateFlow<DownloadState>(DownloadState.Idle)
         val downloadState: StateFlow<DownloadState> = _downloadState.asStateFlow()
 
-        fun startDownload(
+        fun startDownloadWithUrls(
+            context: Context,
+            pageUrls: List<String>,
+            docTitle: String?,
+            resolution: ResolutionQuality = ResolutionQuality.ULTRA
+        ) {
+            val intent = Intent(context, PdfDownloadService::class.java).apply {
+                action = ACTION_START_WITH_URLS
+                putStringArrayListExtra(EXTRA_PAGE_URLS, ArrayList(pageUrls))
+                putExtra(EXTRA_DOC_TITLE, docTitle)
+                putExtra(EXTRA_RESOLUTION_NAME, resolution.name)
+            }
+            startServiceIntent(context, intent)
+        }
+
+        fun startProbeDownload(
             context: Context,
             firstImageUrl: String,
             docTitle: String?,
             resolution: ResolutionQuality = ResolutionQuality.ULTRA
         ) {
             val intent = Intent(context, PdfDownloadService::class.java).apply {
-                action = ACTION_START
+                action = ACTION_START_PROBE
                 putExtra(EXTRA_FIRST_IMAGE_URL, firstImageUrl)
                 putExtra(EXTRA_DOC_TITLE, docTitle)
                 putExtra(EXTRA_RESOLUTION_NAME, resolution.name)
             }
+            startServiceIntent(context, intent)
+        }
 
+        fun startDirectPdfDownload(
+            context: Context,
+            directPdfUrl: String,
+            docTitle: String?
+        ) {
+            val intent = Intent(context, PdfDownloadService::class.java).apply {
+                action = ACTION_START_DIRECT
+                putExtra(EXTRA_DIRECT_URL, directPdfUrl)
+                putExtra(EXTRA_DOC_TITLE, docTitle)
+            }
+            startServiceIntent(context, intent)
+        }
+
+        private fun startServiceIntent(context: Context, intent: Intent) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {
@@ -119,7 +155,25 @@ class PdfDownloadService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START -> {
+            ACTION_START_WITH_URLS -> {
+                val pageUrls = intent.getStringArrayListExtra(EXTRA_PAGE_URLS) ?: arrayListOf()
+                val docTitle = intent.getStringExtra(EXTRA_DOC_TITLE)
+                val resName = intent.getStringExtra(EXTRA_RESOLUTION_NAME)
+                val resolution = try {
+                    if (resName != null) ResolutionQuality.valueOf(resName) else ResolutionQuality.ULTRA
+                } catch (e: Exception) {
+                    ResolutionQuality.ULTRA
+                }
+
+                if (pageUrls.isNotEmpty()) {
+                    startForegroundWithNotification("Preparing to download ${pageUrls.size} pages...")
+                    beginPagesDownload(pageUrls, docTitle, resolution)
+                } else {
+                    stopSelf()
+                }
+            }
+
+            ACTION_START_PROBE -> {
                 val firstImageUrl = intent.getStringExtra(EXTRA_FIRST_IMAGE_URL)
                 val docTitle = intent.getStringExtra(EXTRA_DOC_TITLE)
                 val resName = intent.getStringExtra(EXTRA_RESOLUTION_NAME)
@@ -130,12 +184,24 @@ class PdfDownloadService : Service() {
                 }
 
                 if (!firstImageUrl.isNullOrBlank()) {
-                    startForegroundWithNotification("Initializing smart download...")
-                    beginSmartLoopDownload(firstImageUrl, docTitle, resolution)
+                    startForegroundWithNotification("Probing high-resolution document pages...")
+                    beginResilientProbeDownload(firstImageUrl, docTitle, resolution)
                 } else {
                     stopSelf()
                 }
             }
+
+            ACTION_START_DIRECT -> {
+                val directUrl = intent.getStringExtra(EXTRA_DIRECT_URL)
+                val docTitle = intent.getStringExtra(EXTRA_DOC_TITLE)
+                if (!directUrl.isNullOrBlank()) {
+                    startForegroundWithNotification("Downloading original PDF...")
+                    beginDirectDownload(directUrl, docTitle)
+                } else {
+                    stopSelf()
+                }
+            }
+
             ACTION_CANCEL -> {
                 cancelCurrentProcess()
                 stopSelf()
@@ -163,14 +229,89 @@ class PdfDownloadService : Service() {
     }
 
     /**
-     * Smart Loop Downloader:
-     * 1. Begins at page=1 (with page=0 fallback if needed)
-     * 2. Loops dynamically until HTTP status != 200 or Bitmap == null (auto-detects end of document)
-     * 3. Writes each Bitmap directly into PdfDocument and recycles it to keep memory footprint minimal
-     * 4. Updates foreground notification on every page downloaded
-     * 5. Saves compiled PDF to public Downloads directory
+     * Downloads an exact list of intercepted page URLs with retries and rate-limit backoff.
      */
-    private fun beginSmartLoopDownload(
+    private fun beginPagesDownload(
+        pageUrls: List<String>,
+        title: String?,
+        resolution: ResolutionQuality
+    ) {
+        downloadJob?.cancel()
+        downloadJob = serviceScope.launch {
+            val pdfDocument = PdfDocument()
+            val paint = Paint().apply {
+                isAntiAlias = true
+                isFilterBitmap = true
+                isDither = true
+            }
+
+            val total = pageUrls.size
+            var successfulCount = 0
+            val userAgent = DriveExtractorEngine.DESKTOP_USER_AGENT
+
+            try {
+                for (i in pageUrls.indices) {
+                    if (!isActiveTask()) break
+                    val pageDisplayNum = i + 1
+                    val rawUrl = pageUrls[i]
+                    val upgradedUrl = DriveExtractorEngine.upgradeImageUrlResolution(rawUrl, resolution)
+
+                    val statusMsg = "Downloading page $pageDisplayNum of $total..."
+                    updateProgress(
+                        DownloadState.DownloadingImages(
+                            current = pageDisplayNum,
+                            total = total,
+                            percent = pageDisplayNum.toFloat() / total,
+                            message = statusMsg
+                        ),
+                        statusMsg,
+                        pageDisplayNum,
+                        total
+                    )
+
+                    // Download with automatic 3-attempt retry
+                    val bitmap = downloadBitmapWithRetry(upgradedUrl, userAgent, maxRetries = 3)
+                    if (bitmap != null) {
+                        successfulCount++
+                        writeBitmapToPdf(pdfDocument, bitmap, successfulCount, paint)
+                    } else {
+                        Log.w(TAG, "Failed to fetch page $pageDisplayNum after retries")
+                    }
+
+                    // Polite delay to prevent rate-limiting from Google's CDN
+                    delay(150)
+                }
+
+                if (successfulCount == 0) {
+                    pdfDocument.close()
+                    val errorMsg = "Could not download any pages from document."
+                    _downloadState.value = DownloadState.Error(errorMsg)
+                    showErrorNotification(errorMsg)
+                    return@launch
+                }
+
+                compileAndSavePdf(pdfDocument, title, successfulCount)
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Page download failed", e)
+                try { pdfDocument.close() } catch (ex: Exception) {}
+                val errorMsg = "Download error: ${e.localizedMessage ?: "Unknown error"}"
+                _downloadState.value = DownloadState.Error(errorMsg)
+                showErrorNotification(errorMsg)
+            } finally {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
+        }
+    }
+
+    /**
+     * Resilient Probe Downloader:
+     * Used when single URL template is provided with page=\d+.
+     * Loops forward with delays and 3-attempt retries per page.
+     * Only terminates after 2 consecutive missing pages, avoiding premature stops.
+     */
+    private fun beginResilientProbeDownload(
         firstImageUrl: String,
         title: String?,
         resolution: ResolutionQuality
@@ -184,51 +325,55 @@ class PdfDownloadService : Service() {
                 isDither = true
             }
 
-            var currentPage = 1
-            var hasMorePages = true
             var successfulPagesCount = 0
             val userAgent = DriveExtractorEngine.DESKTOP_USER_AGENT
+            var consecutiveFailures = 0
 
             try {
-                // Test if page 1 works, or if 0-indexed
+                // Test if 0-indexed or 1-indexed
                 var startingPageIndex = 1
                 val testPage1Url = DriveExtractorEngine.buildPageUrl(firstImageUrl, 1, resolution)
-                val testPage1Bitmap = downloadBitmapFromUrl(testPage1Url, userAgent)
+                val testPage1Bitmap = downloadBitmapWithRetry(testPage1Url, userAgent, maxRetries = 2)
 
-                if (testPage1Bitmap == null) {
-                    // Try 0-indexed fallback
+                if (testPage1Bitmap != null) {
+                    successfulPagesCount++
+                    writeBitmapToPdf(pdfDocument, testPage1Bitmap, 1, paint)
+                    updateProbeProgress(1, title)
+                } else {
                     val testPage0Url = DriveExtractorEngine.buildPageUrl(firstImageUrl, 0, resolution)
-                    val testPage0Bitmap = downloadBitmapFromUrl(testPage0Url, userAgent)
+                    val testPage0Bitmap = downloadBitmapWithRetry(testPage0Url, userAgent, maxRetries = 2)
                     if (testPage0Bitmap != null) {
                         startingPageIndex = 0
-                        writeBitmapToPdf(pdfDocument, testPage0Bitmap, 1, paint)
                         successfulPagesCount++
-                        updatePageProgress(1, title)
+                        writeBitmapToPdf(pdfDocument, testPage0Bitmap, 1, paint)
+                        updateProbeProgress(1, title)
                     }
-                } else {
-                    writeBitmapToPdf(pdfDocument, testPage1Bitmap, 1, paint)
-                    successfulPagesCount++
-                    updatePageProgress(1, title)
                 }
 
-                // If starting page succeeded, continue loop from next page index
                 if (successfulPagesCount > 0) {
                     var pageToFetch = startingPageIndex + 1
-                    while (hasMorePages && downloadJob?.isActive == true) {
+                    while (isActiveTask()) {
                         val pageDisplayIndex = successfulPagesCount + 1
-                        updatePageProgress(pageDisplayIndex, title)
+                        updateProbeProgress(pageDisplayIndex, title)
 
                         val pageUrl = DriveExtractorEngine.buildPageUrl(firstImageUrl, pageToFetch, resolution)
-                        val bitmap = downloadBitmapFromUrl(pageUrl, userAgent)
+                        val bitmap = downloadBitmapWithRetry(pageUrl, userAgent, maxRetries = 3)
 
                         if (bitmap != null) {
-                            writeBitmapToPdf(pdfDocument, bitmap, pageDisplayIndex, paint)
+                            consecutiveFailures = 0
                             successfulPagesCount++
+                            writeBitmapToPdf(pdfDocument, bitmap, successfulPagesCount, paint)
                             pageToFetch++
+                            // Polite delay between requests
+                            delay(200)
                         } else {
-                            // Non-200 HTTP code or null Bitmap returned: reached end of document
-                            hasMorePages = false
-                            break
+                            consecutiveFailures++
+                            Log.d(TAG, "Page $pageToFetch returned null (failures: $consecutiveFailures)")
+                            if (consecutiveFailures >= 2) {
+                                // 2 consecutive pages not found: reached document end
+                                break
+                            }
+                            pageToFetch++
                         }
                     }
                 }
@@ -238,63 +383,13 @@ class PdfDownloadService : Service() {
                     val errorMsg = "Could not download document pages from this link."
                     _downloadState.value = DownloadState.Error(errorMsg)
                     showErrorNotification(errorMsg)
-                    stopSelf()
                     return@launch
                 }
 
-                // Finalize PDF
-                val statusMsg = "Saving $successfulPagesCount pages to Downloads..."
-                updateProgress(
-                    DownloadState.CompilingPdf(
-                        currentPage = successfulPagesCount,
-                        totalPages = successfulPagesCount,
-                        percent = 1f,
-                        message = statusMsg
-                    ),
-                    statusMsg,
-                    successfulPagesCount,
-                    successfulPagesCount
-                )
-
-                val outputStream = ByteArrayOutputStream()
-                pdfDocument.writeTo(outputStream)
-                pdfDocument.close()
-                val pdfBytes = outputStream.toByteArray()
-
-                val finalFileName = PdfStorageHelper.generateFileName(title)
-                val saveResult = PdfStorageHelper.savePdfToDownloads(applicationContext, pdfBytes, finalFileName)
-                val cacheFile = withContext(Dispatchers.IO) {
-                    PdfStorageHelper.saveToAppCache(applicationContext, pdfBytes, finalFileName)
-                }
-
-                saveResult.onSuccess { mediaStoreUri ->
-                    val historyItem = DownloadHistoryItem(
-                        id = UUID.randomUUID().toString(),
-                        title = title ?: finalFileName,
-                        uriString = mediaStoreUri.toString(),
-                        pageCount = successfulPagesCount,
-                        fileSizeBytes = pdfBytes.size.toLong(),
-                        timestamp = System.currentTimeMillis()
-                    )
-                    historyRepository.addItem(historyItem)
-
-                    _downloadState.value = DownloadState.Success(
-                        uri = mediaStoreUri,
-                        fileName = finalFileName,
-                        pageCount = successfulPagesCount,
-                        fileSizeBytes = pdfBytes.size.toLong(),
-                        localPath = cacheFile.absolutePath
-                    )
-
-                    showSuccessNotification(mediaStoreUri, cacheFile, finalFileName, successfulPagesCount)
-                }.onFailure { error ->
-                    val errorMsg = "Failed to save PDF: ${error.localizedMessage}"
-                    _downloadState.value = DownloadState.Error(errorMsg)
-                    showErrorNotification(errorMsg)
-                }
+                compileAndSavePdf(pdfDocument, title, successfulPagesCount)
 
             } catch (e: Exception) {
-                Log.e(TAG, "Download loop failed", e)
+                Log.e(TAG, "Download probe failed", e)
                 try { pdfDocument.close() } catch (closeEx: Exception) {}
                 val errorMsg = "Download error: ${e.localizedMessage ?: "Unknown error"}"
                 _downloadState.value = DownloadState.Error(errorMsg)
@@ -303,6 +398,131 @@ class PdfDownloadService : Service() {
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
+        }
+    }
+
+    /**
+     * Direct PDF download when file has open export permissions.
+     */
+    private fun beginDirectDownload(directUrl: String, title: String?) {
+        downloadJob?.cancel()
+        downloadJob = serviceScope.launch {
+            try {
+                updateProgress(
+                    DownloadState.DownloadingImages(1, 1, 0.5f, "Downloading original PDF document..."),
+                    "Downloading original PDF document...",
+                    50,
+                    100
+                )
+
+                val request = Request.Builder()
+                    .url(directUrl)
+                    .addHeader("User-Agent", DriveExtractorEngine.DESKTOP_USER_AGENT)
+                    .build()
+
+                val response = httpClient.newCall(request).execute()
+                if (!response.isSuccessful) {
+                    response.close()
+                    throw Exception("Direct download failed with HTTP ${response.code}")
+                }
+
+                val bytes = response.body?.bytes() ?: throw Exception("Empty PDF response received")
+                val finalFileName = PdfStorageHelper.generateFileName(title)
+                val saveResult = PdfStorageHelper.savePdfToDownloads(applicationContext, bytes, finalFileName)
+                val cacheFile = withContext(Dispatchers.IO) {
+                    PdfStorageHelper.saveToAppCache(applicationContext, bytes, finalFileName)
+                }
+
+                saveResult.onSuccess { mediaStoreUri ->
+                    val historyItem = DownloadHistoryItem(
+                        id = UUID.randomUUID().toString(),
+                        title = title ?: finalFileName,
+                        uriString = mediaStoreUri.toString(),
+                        pageCount = 1,
+                        fileSizeBytes = bytes.size.toLong(),
+                        timestamp = System.currentTimeMillis()
+                    )
+                    historyRepository.addItem(historyItem)
+
+                    _downloadState.value = DownloadState.Success(
+                        uri = mediaStoreUri,
+                        fileName = finalFileName,
+                        pageCount = 1,
+                        fileSizeBytes = bytes.size.toLong(),
+                        localPath = cacheFile.absolutePath
+                    )
+                    showSuccessNotification(mediaStoreUri, cacheFile, finalFileName, 1)
+                }.onFailure { error ->
+                    val errorMsg = "Failed to save PDF: ${error.localizedMessage}"
+                    _downloadState.value = DownloadState.Error(errorMsg)
+                    showErrorNotification(errorMsg)
+                }
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Direct download failed", e)
+                val errorMsg = "Direct PDF download failed: ${e.localizedMessage}"
+                _downloadState.value = DownloadState.Error(errorMsg)
+                showErrorNotification(errorMsg)
+            } finally {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
+        }
+    }
+
+    private suspend fun compileAndSavePdf(
+        pdfDocument: PdfDocument,
+        title: String?,
+        pageCount: Int
+    ) {
+        val statusMsg = "Saving $pageCount pages to Downloads..."
+        updateProgress(
+            DownloadState.CompilingPdf(
+                currentPage = pageCount,
+                totalPages = pageCount,
+                percent = 1f,
+                message = statusMsg
+            ),
+            statusMsg,
+            pageCount,
+            pageCount
+        )
+
+        val outputStream = ByteArrayOutputStream()
+        pdfDocument.writeTo(outputStream)
+        pdfDocument.close()
+        val pdfBytes = outputStream.toByteArray()
+
+        val finalFileName = PdfStorageHelper.generateFileName(title)
+        val saveResult = PdfStorageHelper.savePdfToDownloads(applicationContext, pdfBytes, finalFileName)
+        val cacheFile = withContext(Dispatchers.IO) {
+            PdfStorageHelper.saveToAppCache(applicationContext, pdfBytes, finalFileName)
+        }
+
+        saveResult.onSuccess { mediaStoreUri ->
+            val historyItem = DownloadHistoryItem(
+                id = UUID.randomUUID().toString(),
+                title = title ?: finalFileName,
+                uriString = mediaStoreUri.toString(),
+                pageCount = pageCount,
+                fileSizeBytes = pdfBytes.size.toLong(),
+                timestamp = System.currentTimeMillis()
+            )
+            historyRepository.addItem(historyItem)
+
+            _downloadState.value = DownloadState.Success(
+                uri = mediaStoreUri,
+                fileName = finalFileName,
+                pageCount = pageCount,
+                fileSizeBytes = pdfBytes.size.toLong(),
+                localPath = cacheFile.absolutePath
+            )
+
+            showSuccessNotification(mediaStoreUri, cacheFile, finalFileName, pageCount)
+        }.onFailure { error ->
+            val errorMsg = "Failed to save PDF: ${error.localizedMessage}"
+            _downloadState.value = DownloadState.Error(errorMsg)
+            showErrorNotification(errorMsg)
         }
     }
 
@@ -337,23 +557,37 @@ class PdfDownloadService : Service() {
         }
     }
 
-    private fun updatePageProgress(pageNumber: Int, docTitle: String?) {
-        val titlePrefix = if (!docTitle.isNullOrBlank()) "$docTitle: " else ""
-        val message = "${titlePrefix}Downloading & writing page $pageNumber..."
-        updateProgress(
-            DownloadState.CompilingPdf(
-                currentPage = pageNumber,
-                totalPages = pageNumber,
-                percent = 0f,
-                message = message
-            ),
-            message,
-            pageNumber,
-            0 // Indeterminate progress until auto-end
-        )
+    private suspend fun downloadBitmapWithRetry(
+        url: String,
+        userAgent: String,
+        maxRetries: Int = 3
+    ): Bitmap? {
+        var attempts = 0
+        while (attempts < maxRetries && isActiveTask()) {
+            attempts++
+            val result = downloadSingleBitmap(url, userAgent)
+            if (result.first != null) {
+                return result.first
+            }
+
+            val httpCode = result.second
+            if (httpCode == 404) {
+                // Definitively not found, no need to retry
+                return null
+            }
+
+            if (httpCode == 429) {
+                // Rate limited, back off significantly
+                Log.w(TAG, "Rate limited (429) on attempt $attempts. Backing off...")
+                delay(1500L * attempts)
+            } else {
+                delay(600L * attempts)
+            }
+        }
+        return null
     }
 
-    private fun downloadBitmapFromUrl(url: String, userAgent: String): Bitmap? {
+    private fun downloadSingleBitmap(url: String, userAgent: String): Pair<Bitmap?, Int> {
         return try {
             val cookie = CookieManager.getInstance().getCookie(url)
             val requestBuilder = Request.Builder()
@@ -367,26 +601,44 @@ class PdfDownloadService : Service() {
             }
 
             val response = httpClient.newCall(requestBuilder.build()).execute()
-            if (response.code != 200) {
+            val code = response.code
+            if (code != 200) {
                 response.close()
-                return null
+                return Pair(null, code)
             }
 
             val bytes = response.body?.bytes() ?: run {
                 response.close()
-                return null
+                return Pair(null, code)
             }
-            if (bytes.isEmpty()) return null
+            if (bytes.isEmpty()) return Pair(null, code)
 
             val options = BitmapFactory.Options().apply {
                 inPreferredConfig = Bitmap.Config.ARGB_8888
                 inPremultiplied = true
             }
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+            Pair(bitmap, 200)
         } catch (e: Exception) {
-            Log.w(TAG, "Request ended: ${e.localizedMessage}")
-            null
+            Log.w(TAG, "Download request error: ${e.localizedMessage}")
+            Pair(null, -1)
         }
+    }
+
+    private fun updateProbeProgress(pageNumber: Int, docTitle: String?) {
+        val titlePrefix = if (!docTitle.isNullOrBlank()) "$docTitle: " else ""
+        val message = "${titlePrefix}Downloading & compiling page $pageNumber..."
+        updateProgress(
+            DownloadState.CompilingPdf(
+                currentPage = pageNumber,
+                totalPages = pageNumber,
+                percent = 0f,
+                message = message
+            ),
+            message,
+            pageNumber,
+            0
+        )
     }
 
     private fun updateProgress(
@@ -480,6 +732,10 @@ class PdfDownloadService : Service() {
             .build()
 
         notificationManager.notify(NOTIFICATION_ID_COMPLETE, errorNotification)
+    }
+
+    private fun isActiveTask(): Boolean {
+        return downloadJob?.isActive == true
     }
 
     private fun cancelCurrentProcess() {
