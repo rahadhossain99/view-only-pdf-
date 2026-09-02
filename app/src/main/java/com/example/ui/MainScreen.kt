@@ -163,7 +163,8 @@ fun MainScreen(
                         state = downloadState,
                         documentTitle = documentTitle,
                         onCancel = { viewModel.cancelDownload() },
-                        onForceCompile = { viewModel.forceFinishExtraction() }
+                        onForceCompile = { viewModel.forceFinishExtraction() },
+                        onOpenInteractive = { viewModel.setInteractiveMode(true) }
                     )
                 }
             }
@@ -210,11 +211,15 @@ fun MainScreen(
         }
     }
 
-    // Modal Interactive Viewer Sheet
+    // Interactive Viewer Dialog
     if (isInteractiveMode) {
         InteractiveWebViewSheet(
             url = inputUrl.ifBlank { "https://drive.google.com" },
             onDismiss = { viewModel.setInteractiveMode(false) },
+            onCompilePages = { pages, title ->
+                viewModel.setInteractiveMode(false)
+                viewModel.startDownloadWithPages(pages, title)
+            },
             onStartAutoExtraction = {
                 viewModel.setInteractiveMode(false)
                 viewModel.startDownload()

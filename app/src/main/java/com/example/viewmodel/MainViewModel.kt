@@ -164,6 +164,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _currentDocumentTitle.value = title
         }
 
+        engine.onTotalPagesDetected = { total ->
+            val currentState = _downloadState.value
+            if (currentState is DownloadState.InterceptingPages) {
+                _downloadState.value = currentState.copy(
+                    estimatedTotal = maxOf(currentState.estimatedTotal, total),
+                    message = "Capturing pages (Total: $total detected in viewer)..."
+                )
+            }
+        }
+
         engine.onPageDiscovered = { pageNum, url, totalCaptured ->
             val currentList = _discoveredPages.value.toMutableList()
             if (currentList.none { it.pageNumber == pageNum }) {
@@ -242,6 +252,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun forceFinishExtraction() {
         extractorEngine?.forceCompileNow()
+    }
+
+    fun startDownloadWithPages(pageUrls: List<String>, title: String?) {
+        if (pageUrls.isEmpty()) return
+        cancelDownload()
+        val docTitle = title ?: _currentDocumentTitle.value
+        _currentDocumentTitle.value = docTitle
+        _downloadState.value = DownloadState.DownloadingImages(
+            current = 1,
+            total = pageUrls.size,
+            percent = 0.05f,
+            message = "Starting download of ${pageUrls.size} document pages..."
+        )
+        PdfDownloadService.startDownloadWithUrls(
+            context = context,
+            pageUrls = pageUrls,
+            docTitle = docTitle,
+            resolution = _resolutionQuality.value
+        )
     }
 
     fun cancelDownload() {

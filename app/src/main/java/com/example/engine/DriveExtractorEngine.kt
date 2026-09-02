@@ -37,6 +37,7 @@ class DriveExtractorEngine(
 
     var onStatusUpdate: ((message: String) -> Unit)? = null
     var onTitleExtracted: ((title: String) -> Unit)? = null
+    var onTotalPagesDetected: ((total: Int) -> Unit)? = null
     var onPageDiscovered: ((pageNumber: Int, highResUrl: String, totalCaptured: Int) -> Unit)? = null
     var onExtractionCompleted: ((pageUrls: List<String>, title: String?, baseTemplateUrl: String?) -> Unit)? = null
     var onError: ((message: String) -> Unit)? = null
@@ -203,6 +204,15 @@ class DriveExtractorEngine(
         mainHandler.post {
             try {
                 val wv = existingWebView ?: WebView(context).also { webView = it }
+                try {
+                    wv.measure(
+                        android.view.View.MeasureSpec.makeMeasureSpec(1080, android.view.View.MeasureSpec.EXACTLY),
+                        android.view.View.MeasureSpec.makeMeasureSpec(1920, android.view.View.MeasureSpec.EXACTLY)
+                    )
+                    wv.layout(0, 0, 1080, 1920)
+                } catch (e: Exception) {
+                    Log.d(TAG, "Layout measurement: ${e.message}")
+                }
                 setupWebView(wv, targetUrl)
             } catch (e: Exception) {
                 Log.e(TAG, "Error initializing WebView", e)
@@ -380,12 +390,32 @@ class DriveExtractorEngine(
                 if (window._driveAutoScrollerActive) return;
                 window._driveAutoScrollerActive = true;
 
-                function findScrollElement() {
-                    return document.querySelector('.drive-viewer-paginated-scrollable') || 
-                           document.querySelector('.ndfHFb-c4YZDc-bN97Pc') ||
-                           document.querySelector('.drive-viewer-content') ||
-                           document.documentElement || 
-                           document.body;
+                function getScrollContainer() {
+                    var selectors = [
+                        '.drive-viewer-paginated-scrollable',
+                        '.ndfHFb-c4YZDc-bN97Pc',
+                        '.ndfHFb-c4YZDc-Wrql6b',
+                        '.drive-viewer-content',
+                        '[role="main"]',
+                        '.drive-viewer-toolstrip'
+                    ];
+                    for (var i = 0; i < selectors.length; i++) {
+                        var el = document.querySelector(selectors[i]);
+                        if (el && el.scrollHeight > el.clientHeight + 40) {
+                            return el;
+                        }
+                    }
+                    var divs = document.querySelectorAll('div');
+                    for (var j = 0; j < divs.length; j++) {
+                        var d = divs[j];
+                        if (d.scrollHeight > d.clientHeight + 80) {
+                            var style = window.getComputedStyle(d);
+                            if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
+                                return d;
+                            }
+                        }
+                    }
+                    return document.scrollingElement || document.documentElement || document.body;
                 }
 
                 function scrapeDomImages() {
@@ -405,38 +435,98 @@ class DriveExtractorEngine(
                             }
                         }
                     }
-                }
 
-                var stagnantCycles = 0;
-                var lastScroll = -1;
-                var scrollTimer = setInterval(function() {
-                    var el = findScrollElement();
-                    scrapeDomImages();
-
-                    var curScroll = el.scrollTop || window.pageYOffset || 0;
-                    var maxScroll = (el.scrollHeight || document.body.scrollHeight) - (el.clientHeight || window.innerHeight);
-
-                    if (curScroll === lastScroll || (maxScroll > 0 && curScroll >= maxScroll - 40)) {
-                        stagnantCycles++;
-                        if (stagnantCycles >= 4) {
-                            clearInterval(scrollTimer);
-                            scrapeDomImages();
-                            if (window.DriveBridge && window.DriveBridge.onScrollFinished) {
-                                window.DriveBridge.onScrollFinished();
+                    var bgElements = document.querySelectorAll('[style*="background-image"], [style*="drive-viewer"]');
+                    for (var k = 0; k < bgElements.length; k++) {
+                        var bgStyle = bgElements[k].style.backgroundImage;
+                        if (bgStyle && bgStyle.indexOf('url(') !== -1) {
+                            var match = /url\(['"]?(.*?)['"]?\)/.exec(bgStyle);
+                            if (match && match[1]) {
+                                var bgUrl = match[1];
+                                if (bgUrl.indexOf('viewer') !== -1 || bgUrl.indexOf('googleusercontent') !== -1) {
+                                    if (window.DriveBridge && window.DriveBridge.onPageImageFound) {
+                                        window.DriveBridge.onPageImageFound(bgUrl, -1);
+                                    }
+                                }
                             }
                         }
-                    } else {
-                        stagnantCycles = 0;
                     }
-                    lastScroll = curScroll;
+                }
 
-                    var step = Math.max(350, (el.clientHeight || window.innerHeight) * 0.75);
-                    if (el.scrollTop !== undefined && el.scrollHeight > el.clientHeight) {
-                        el.scrollTop = curScroll + step;
-                    } else {
-                        window.scrollBy(0, step);
+                function scrapeTotalPageCount() {
+                    var textNodes = document.querySelectorAll('.drive-viewer-toolstrip, .ndfHFb-c4YZDc-j7LFlb, div, span');
+                    for (var i = 0; i < textNodes.length; i++) {
+                        var txt = textNodes[i].innerText || "";
+                        var match = /(?:of|\/)\s*(\d+)/i.exec(txt);
+                        if (match && match[1]) {
+                            var total = parseInt(match[1], 10);
+                            if (total > 0 && total < 1000) {
+                                if (window.DriveBridge && window.DriveBridge.onTotalPagesDetected) {
+                                    window.DriveBridge.onTotalPagesDetected(total);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                var initAttempts = 0;
+                var initInterval = setInterval(function() {
+                    initAttempts++;
+                    scrapeDomImages();
+                    scrapeTotalPageCount();
+                    var el = getScrollContainer();
+                    var hasImages = document.querySelectorAll('img').length > 0;
+                    
+                    if (hasImages || (el && el.scrollHeight > el.clientHeight + 80) || initAttempts >= 6) {
+                        clearInterval(initInterval);
+                        startContinuousScroll();
                     }
                 }, 350);
+
+                function startContinuousScroll() {
+                    var stagnantCycles = 0;
+                    var lastScrollTop = -1;
+                    var totalScrollSteps = 0;
+                    
+                    var scrollTimer = setInterval(function() {
+                        scrapeDomImages();
+                        scrapeTotalPageCount();
+                        var el = getScrollContainer();
+
+                        var curScroll = el.scrollTop || window.pageYOffset || 0;
+                        var maxScroll = (el.scrollHeight || document.body.scrollHeight) - (el.clientHeight || window.innerHeight);
+
+                        totalScrollSteps++;
+
+                        var atBottom = (maxScroll > 0 && curScroll >= maxScroll - 60);
+                        var scrollStuck = (curScroll === lastScrollTop && totalScrollSteps > 8);
+
+                        if (atBottom || scrollStuck) {
+                            stagnantCycles++;
+                            if (stagnantCycles >= 6) {
+                                clearInterval(scrollTimer);
+                                scrapeDomImages();
+                                if (window.DriveBridge && window.DriveBridge.onScrollFinished) {
+                                    window.DriveBridge.onScrollFinished();
+                                }
+                                return;
+                            }
+                        } else {
+                            stagnantCycles = 0;
+                        }
+                        lastScrollTop = curScroll;
+
+                        var step = Math.max(400, (el.clientHeight || window.innerHeight || 800) * 0.85);
+                        if (el.scrollTop !== undefined && el.scrollHeight > el.clientHeight) {
+                            el.scrollTop = curScroll + step;
+                        }
+                        window.scrollBy(0, step);
+                        try {
+                            el.dispatchEvent(new WheelEvent('wheel', { deltaY: step, bubbles: true }));
+                        } catch(e) {}
+                    }, 400);
+                }
             })();
         """.trimIndent()
 
@@ -467,6 +557,15 @@ class DriveExtractorEngine(
         }
 
         @JavascriptInterface
+        fun onTotalPagesDetected(total: Int) {
+            if (total > 0) {
+                mainHandler.post {
+                    onTotalPagesDetected?.invoke(total)
+                }
+            }
+        }
+
+        @JavascriptInterface
         fun onPageImageFound(url: String, pageIndex: Int) {
             if (url.isNotBlank() && isDriveViewerImageUrl(url)) {
                 handleImageDiscovered(url, if (pageIndex >= 0) pageIndex + 1 else null)
@@ -478,7 +577,7 @@ class DriveExtractorEngine(
             Log.d(TAG, "JS reported scroll finished. Captured count: ${capturedPagesMap.size}")
             isScrollCompleted = true
             if (capturedPagesMap.isNotEmpty()) {
-                scheduleFinishDebounce(1000L)
+                scheduleFinishDebounce(1200L)
             }
         }
     }

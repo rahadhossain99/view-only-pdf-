@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.HourglassEmpty
 import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.outlined.CloudDownload
 import androidx.compose.material.icons.outlined.FindInPage
 import androidx.compose.material3.Button
@@ -53,6 +54,7 @@ fun ProgressCard(
     documentTitle: String?,
     onCancel: () -> Unit,
     onForceCompile: () -> Unit,
+    onOpenInteractive: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -163,23 +165,52 @@ fun ProgressCard(
                 }
             }
 
-            // Force Compile action button if user wants to compile discovered pages now
-            if (state is DownloadState.InterceptingPages && state.capturedCount > 0) {
-                OutlinedButton(
-                    onClick = onForceCompile,
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.fillMaxWidth()
+            // Actions row: Live Viewer & Force Compile
+            val showViewer = onOpenInteractive != null && (state is DownloadState.LoadingWebView || state is DownloadState.InterceptingPages)
+            val showCompile = state is DownloadState.InterceptingPages && state.capturedCount > 0
+
+            if (showViewer || showCompile) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.FastForward,
-                        contentDescription = "Compile Discovered Pages",
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Compile ${state.capturedCount} Captured Pages Now",
-                        style = MaterialTheme.typography.labelMedium
-                    )
+                    if (showViewer) {
+                        OutlinedButton(
+                            onClick = onOpenInteractive!!,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Visibility,
+                                contentDescription = "Open Live Viewer",
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Live Viewer",
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
+                    }
+
+                    if (showCompile) {
+                        Button(
+                            onClick = onForceCompile,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1.3f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.FastForward,
+                                contentDescription = "Compile Discovered Pages",
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Compile (${(state as DownloadState.InterceptingPages).capturedCount} Pages)",
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
+                    }
                 }
             }
         }
