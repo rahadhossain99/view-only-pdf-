@@ -60,6 +60,7 @@ data class DownloadHistoryItem(
     val uriString: String,
     val pageCount: Int,
     val fileSizeBytes: Long,
+    val localPath: String? = null,
     val timestamp: Long = System.currentTimeMillis()
 )
 

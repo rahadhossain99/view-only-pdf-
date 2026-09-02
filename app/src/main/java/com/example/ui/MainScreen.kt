@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -52,10 +53,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import com.example.data.model.DownloadState
 import com.example.ui.components.AutoScreenshotStudioDialog
 import com.example.ui.components.HistorySection
@@ -132,6 +135,23 @@ fun MainScreen(
             )
         }
     ) { innerPadding ->
+        // Hidden offscreen extraction WebView attached to the Window
+        Box(
+            modifier = Modifier
+                .size(0.dp)
+                .graphicsLayer {
+                    alpha = 0f
+                    translationX = -5000f
+                }
+        ) {
+            AndroidView(
+                modifier = Modifier.requiredSize(800.dp, 1200.dp),
+                factory = { ctx ->
+                    viewModel.getOrCreateExtractionWebView(ctx)
+                }
+            )
+        }
+
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
@@ -275,13 +295,13 @@ private fun FeatureGuideCard() {
 
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "High-Quality Page Interceptor",
+                    text = "Precision Page-by-Page PDF Creator",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onPrimaryContainer
                 )
                 Text(
-                    text = "Extracts protected & view-only Drive PDFs into native, high-resolution A4 documents without download restrictions.",
+                    text = "Automatically scrolls through Google Drive documents, taking exact real-size page screenshots without cutoffs or splits, and builds a native A4 PDF in the background.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
                 )

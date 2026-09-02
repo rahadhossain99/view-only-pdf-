@@ -35,6 +35,7 @@ class HistoryRepository(context: Context) {
                         uriString = obj.getString("uriString"),
                         pageCount = obj.getInt("pageCount"),
                         fileSizeBytes = obj.getLong("fileSizeBytes"),
+                        localPath = obj.optString("localPath", null),
                         timestamp = obj.getLong("timestamp")
                     )
                 )
@@ -44,6 +45,8 @@ class HistoryRepository(context: Context) {
             e.printStackTrace()
         }
     }
+
+    fun addHistoryItem(item: DownloadHistoryItem) = addItem(item)
 
     fun addItem(item: DownloadHistoryItem) {
         val currentList = _historyFlow.value.toMutableList()
@@ -75,6 +78,7 @@ class HistoryRepository(context: Context) {
                 put("uriString", item.uriString)
                 put("pageCount", item.pageCount)
                 put("fileSizeBytes", item.fileSizeBytes)
+                put("localPath", item.localPath)
                 put("timestamp", item.timestamp)
             }
             jsonArray.put(obj)

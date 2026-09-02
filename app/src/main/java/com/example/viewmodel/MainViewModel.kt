@@ -1,8 +1,10 @@
 package com.example.viewmodel
 
 import android.app.Application
+import android.content.Context
 import android.net.Uri
 import android.util.Log
+import android.webkit.WebView
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.model.DownloadHistoryItem
@@ -154,6 +156,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return@withContext null
     }
 
+    private var attachedExtractionWebView: WebView? = null
+
+    fun getOrCreateExtractionWebView(ctx: Context): WebView {
+        if (attachedExtractionWebView == null) {
+            attachedExtractionWebView = WebView(ctx.applicationContext).apply {
+                layoutParams = android.view.ViewGroup.LayoutParams(1200, 1800)
+            }
+        }
+        return attachedExtractionWebView!!
+    }
+
     private fun startBrowserPageExtraction(cleanUrl: String) {
         val engine = DriveExtractorEngine(context, viewModelScope)
         extractorEngine = engine
@@ -163,6 +176,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (currentState is DownloadState.LoadingWebView) {
                 _downloadState.value = currentState.copy(message = msg)
             } else if (currentState is DownloadState.InterceptingPages) {
+                _downloadState.value = currentState.copy(message = msg)
+            } else if (currentState is DownloadState.DownloadingImages) {
                 _downloadState.value = currentState.copy(message = msg)
             }
         }
@@ -176,7 +191,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (currentState is DownloadState.InterceptingPages) {
                 _downloadState.value = currentState.copy(
                     estimatedTotal = maxOf(currentState.estimatedTotal, total),
-                    message = "Capturing pages (Total: $total detected in viewer)..."
+                    message = "Scanning document pages (Total: $total detected)..."
                 )
             }
         }
@@ -194,12 +209,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 currentList.sortBy { it.pageNumber }
                 _discoveredPages.value = currentList
             }
+        }
 
-            _downloadState.value = DownloadState.InterceptingPages(
-                capturedCount = totalCaptured,
-                estimatedTotal = totalCaptured,
-                message = "Captured page $pageNum ($totalCaptured pages detected)..."
+        // Real-size page screenshot capture progress (guaranteed no cut/split pages)
+        engine.onPageCaptured = { pageNum, total, msg ->
+            _downloadState.value = DownloadState.DownloadingImages(
+                current = pageNum,
+                total = total,
+                percent = pageNum.toFloat() / total.coerceAtLeast(1),
+                message = msg
             )
+        }
+
+        // PDF compilation progress
+        engine.onCompilingPdf = { current, total, percent, msg ->
+            _downloadState.value = DownloadState.CompilingPdf(
+                currentPage = current,
+                totalPages = total,
+                percent = percent,
+                message = msg
+            )
+        }
+
+        // Successful PDF generation from precision screenshots
+        engine.onPdfReady = { uri, fileName, pageCount, fileSizeBytes, localPath ->
+            _downloadState.value = DownloadState.Success(
+                uri = uri,
+                fileName = fileName,
+                pageCount = pageCount,
+                fileSizeBytes = fileSizeBytes,
+                localPath = localPath
+            )
+            extractorEngine = null
         }
 
         engine.onExtractionCompleted = { pageUrls, title, baseTemplateUrl ->
@@ -254,7 +295,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             extractorEngine = null
         }
 
-        engine.startExtraction(cleanUrl, _resolutionQuality.value)
+        engine.startExtraction(cleanUrl, _resolutionQuality.value, attachedExtractionWebView)
     }
 
     fun forceFinishExtraction() {

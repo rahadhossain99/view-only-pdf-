@@ -3,6 +3,8 @@ package com.example.engine
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -13,12 +15,30 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import com.example.data.model.DownloadHistoryItem
 import com.example.data.model.ResolutionQuality
+import com.example.data.storage.HistoryRepository
+import com.example.data.storage.PdfStorageHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.io.File
+import java.io.FileOutputStream
 import java.util.Collections
 import java.util.concurrent.ConcurrentSkipListMap
+
+data class PageBoundingBox(
+    val found: Boolean,
+    val left: Int,
+    val top: Int,
+    val width: Int,
+    val height: Int,
+    val totalDiscovered: Int
+)
 
 class DriveExtractorEngine(
     private val context: Context,
@@ -31,14 +51,22 @@ class DriveExtractorEngine(
 
     private val capturedPagesMap = ConcurrentSkipListMap<Int, String>()
     private val capturedUrlsSet = Collections.synchronizedSet(HashSet<String>())
+    private val capturedPageFiles = Collections.synchronizedList(mutableListOf<File>())
+
     private var mainHandler = Handler(Looper.getMainLooper())
-    private var finishDebounceRunnable: Runnable? = null
-    private var isScrollCompleted = false
+    private var captureJob: Job? = null
+    private var totalDetectedPages: Int = 1
 
     var onStatusUpdate: ((message: String) -> Unit)? = null
     var onTitleExtracted: ((title: String) -> Unit)? = null
     var onTotalPagesDetected: ((total: Int) -> Unit)? = null
     var onPageDiscovered: ((pageNumber: Int, highResUrl: String, totalCaptured: Int) -> Unit)? = null
+    
+    // Precision page-by-page capture callbacks
+    var onPageCaptured: ((pageNum: Int, total: Int, message: String) -> Unit)? = null
+    var onCompilingPdf: ((currentPage: Int, totalPages: Int, percent: Float, message: String) -> Unit)? = null
+    var onPdfReady: ((uri: Uri, fileName: String, pageCount: Int, fileSizeBytes: Long, localPath: String?) -> Unit)? = null
+    
     var onExtractionCompleted: ((pageUrls: List<String>, title: String?, baseTemplateUrl: String?) -> Unit)? = null
     var onError: ((message: String) -> Unit)? = null
 
@@ -148,36 +176,18 @@ class DriveExtractorEngine(
             return modified
         }
 
-        fun buildPageUrl(
-            templateUrl: String,
-            pageNumber: Int,
-            quality: ResolutionQuality
-        ): String {
-            var modified = templateUrl
-
-            val pagePatterns = listOf(
-                Regex("([?&]page=)(\\d+)") to "$1$pageNumber",
-                Regex("([?&]pg=)(\\d+)") to "$1$pageNumber",
-                Regex("([?&]p=)(\\d+)") to "$1$pageNumber",
-                Regex("(page_)(\\d+)") to "$1$pageNumber",
-                Regex("(/page/)(\\d+)") to "$1$pageNumber"
-            )
-
-            var replaced = false
-            for ((regex, replacement) in pagePatterns) {
-                if (regex.containsMatchIn(modified)) {
-                    modified = modified.replace(regex, replacement)
-                    replaced = true
-                    break
-                }
+        fun buildPageUrl(baseUrl: String, pageNumber: Int, quality: ResolutionQuality): String {
+            val highRes = upgradeImageUrlResolution(baseUrl, quality)
+            val pageParam = "page=$pageNumber"
+            return if (highRes.contains("page=")) {
+                highRes.replace(Regex("page=\\d+"), pageParam)
+            } else if (highRes.contains("pg=")) {
+                highRes.replace(Regex("pg=\\d+"), "pg=$pageNumber")
+            } else if (highRes.contains("?")) {
+                "$highRes&$pageParam"
+            } else {
+                "$highRes?$pageParam"
             }
-
-            if (!replaced) {
-                val sep = if (modified.contains("?")) "&" else "?"
-                modified = "$modified${sep}page=$pageNumber"
-            }
-
-            return upgradeImageUrlResolution(modified, quality)
         }
     }
 
@@ -190,10 +200,10 @@ class DriveExtractorEngine(
         currentResolution = resolution
         extractedTitle = null
         isExtracting = true
-        isScrollCompleted = false
         capturedPagesMap.clear()
         capturedUrlsSet.clear()
-        cancelFinishDebounce()
+        capturedPageFiles.clear()
+        captureJob?.cancel()
 
         val targetUrl = sanitizeDriveUrl(url)
         if (targetUrl.isBlank()) {
@@ -206,10 +216,10 @@ class DriveExtractorEngine(
                 val wv = existingWebView ?: WebView(context).also { webView = it }
                 try {
                     wv.measure(
-                        android.view.View.MeasureSpec.makeMeasureSpec(1080, android.view.View.MeasureSpec.EXACTLY),
-                        android.view.View.MeasureSpec.makeMeasureSpec(1920, android.view.View.MeasureSpec.EXACTLY)
+                        android.view.View.MeasureSpec.makeMeasureSpec(1200, android.view.View.MeasureSpec.EXACTLY),
+                        android.view.View.MeasureSpec.makeMeasureSpec(1800, android.view.View.MeasureSpec.EXACTLY)
                     )
-                    wv.layout(0, 0, 1080, 1920)
+                    wv.layout(0, 0, 1200, 1800)
                 } catch (e: Exception) {
                     Log.d(TAG, "Layout measurement: ${e.message}")
                 }
@@ -259,22 +269,16 @@ class DriveExtractorEngine(
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
-                onStatusUpdate?.invoke("Loading Google Drive document viewer...")
+                onStatusUpdate?.invoke("Connecting to Google Drive document...")
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                onStatusUpdate?.invoke("Document viewer loaded. Scrolling to capture all pages...")
-                injectTitleScraper(view)
-                injectAutoScroller(view)
+                onStatusUpdate?.invoke("Document loaded. Initializing precision page capturer...")
+                injectPageScraperAndCaptureScript(view)
 
-                // Safety timeout: if after 15 seconds we have at least 1 page, trigger compile
-                mainHandler.postDelayed({
-                    if (isExtracting && capturedPagesMap.isNotEmpty()) {
-                        Log.d(TAG, "Safety timer fired, triggering completion with ${capturedPagesMap.size} pages")
-                        triggerCompletion()
-                    }
-                }, 15000)
+                // Start the sequential precision page-by-page capture loop
+                startSequentialPageCapture(view ?: wv)
             }
         }
 
@@ -298,7 +302,6 @@ class DriveExtractorEngine(
         } else if (detectedPageNum == 0) {
             1
         } else {
-            // Sequential ordering
             val maxKey = capturedPagesMap.keys.maxOrNull() ?: 0
             maxKey + 1
         }
@@ -308,234 +311,383 @@ class DriveExtractorEngine(
 
         mainHandler.post {
             onPageDiscovered?.invoke(pageNumber, highResUrl, currentTotal)
-            onStatusUpdate?.invoke("Captured page $pageNumber (Total: $currentTotal pages detected)...")
         }
-
-        // Debounce: if no new pages are captured within 3.5 seconds and scroll completed, or 5 seconds otherwise
-        val debounceDelay = if (isScrollCompleted) 2000L else 4000L
-        scheduleFinishDebounce(debounceDelay)
     }
 
-    private fun scheduleFinishDebounce(delayMs: Long) {
-        cancelFinishDebounce()
-        finishDebounceRunnable = Runnable {
-            if (isExtracting && capturedPagesMap.isNotEmpty()) {
-                Log.d(TAG, "Debounce timer expired, auto-completing with ${capturedPagesMap.size} pages")
-                triggerCompletion()
+    private fun injectPageScraperAndCaptureScript(view: WebView?) {
+        val jsScript = """
+            (function() {
+                window._driveCapture = {
+                    hideChrome: function() {
+                        var selectors = [
+                            '.drive-viewer-toolstrip',
+                            '.drive-viewer-action-bar',
+                            '.ndfHFb-c4YZDc-j7LFlb',
+                            '.drive-viewer-popout-button',
+                            '.drive-viewer-banner',
+                            'header',
+                            '[role="banner"]',
+                            '.drive-viewer-navigation-overlay'
+                        ];
+                        for (var i = 0; i < selectors.length; i++) {
+                            var els = document.querySelectorAll(selectors[i]);
+                            for (var j = 0; j < els.length; j++) {
+                                els[j].style.display = 'none';
+                            }
+                        }
+                    },
+
+                    getTitle: function() {
+                        try {
+                            var title = document.title || "";
+                            title = title.replace(" - Google Drive", "").replace(" - Google Docs", "").trim();
+                            var titleElem = document.querySelector('.ndfHFb-c4YZDc-s2gQvd') || 
+                                            document.querySelector('.drive-viewer-toolstrip-name') ||
+                                            document.querySelector('.drive-viewer-title');
+                            if (titleElem && titleElem.innerText) {
+                                title = titleElem.innerText.trim();
+                            }
+                            return title;
+                        } catch(e) { return ""; }
+                    },
+
+                    findPages: function() {
+                        var selectors = [
+                            '.drive-viewer-paginated-page',
+                            '[data-page-index]',
+                            '[data-page-number]',
+                            '.ndfHFb-c4YZDc-Wrql6b',
+                            '.drive-viewer-page'
+                        ];
+                        for (var s = 0; s < selectors.length; s++) {
+                            var list = document.querySelectorAll(selectors[s]);
+                            if (list && list.length > 0) {
+                                return Array.from(list);
+                            }
+                        }
+                        var container = document.querySelector('.drive-viewer-paginated-scrollable, .ndfHFb-c4YZDc-bN97Pc, [role="main"]');
+                        if (container && container.children) {
+                            var valid = [];
+                            for (var i = 0; i < container.children.length; i++) {
+                                var ch = container.children[i];
+                                if (ch.clientHeight > 250 && ch.clientWidth > 250) {
+                                    valid.push(ch);
+                                }
+                            }
+                            if (valid.length > 0) return valid;
+                        }
+                        return [];
+                    },
+
+                    getTotalCount: function() {
+                        var textNodes = document.querySelectorAll('.drive-viewer-toolstrip, .ndfHFb-c4YZDc-j7LFlb, div, span');
+                        for (var i = 0; i < textNodes.length; i++) {
+                            var txt = textNodes[i].innerText || "";
+                            var m = /(?:of|\/)\s*(\d+)/i.exec(txt);
+                            if (m && m[1]) {
+                                var cnt = parseInt(m[1], 10);
+                                if (cnt > 0 && cnt < 1000) return cnt;
+                            }
+                        }
+                        return this.findPages().length;
+                    },
+
+                    scrollToPage: function(idx) {
+                        this.hideChrome();
+                        var pages = this.findPages();
+                        if (!pages || pages.length === 0 || idx >= pages.length) {
+                            var sc = document.querySelector('.drive-viewer-paginated-scrollable, .ndfHFb-c4YZDc-bN97Pc') || document.documentElement || document.body;
+                            var step = 1400;
+                            if (sc.scrollTop !== undefined) {
+                                sc.scrollTop = idx * step;
+                            } else {
+                                window.scrollBy(0, step);
+                            }
+                            return JSON.stringify({
+                                found: false,
+                                left: 0,
+                                top: 0,
+                                width: window.innerWidth || 1200,
+                                height: window.innerHeight || 1800,
+                                totalDiscovered: pages ? pages.length : 0
+                            });
+                        }
+
+                        var pageEl = pages[idx];
+                        pageEl.scrollIntoView({ behavior: 'instant', block: 'start', inline: 'center' });
+
+                        try {
+                            pageEl.dispatchEvent(new Event('scroll', { bubbles: true }));
+                            window.dispatchEvent(new Event('scroll'));
+                        } catch(e) {}
+
+                        var rect = pageEl.getBoundingClientRect();
+                        return JSON.stringify({
+                            found: true,
+                            left: Math.round(rect.left),
+                            top: Math.round(rect.top),
+                            width: Math.round(rect.width),
+                            height: Math.round(rect.height),
+                            totalDiscovered: pages.length
+                        });
+                    },
+
+                    isPageImageReady: function(idx) {
+                        var pages = this.findPages();
+                        if (!pages || idx >= pages.length) return true;
+                        var pageEl = pages[idx];
+                        var img = pageEl.querySelector('img');
+                        if (img) {
+                            return img.complete && img.naturalWidth > 0;
+                        }
+                        return true;
+                    }
+                };
+            })();
+        """.trimIndent()
+
+        view?.evaluateJavascript(jsScript, null)
+    }
+
+    private fun startSequentialPageCapture(wv: WebView) {
+        captureJob?.cancel()
+        captureJob = scope.launch(Dispatchers.Main) {
+            delay(1000)
+            if (!isExtracting) return@launch
+
+            // 1. Scrape Title
+            wv.evaluateJavascript("window._driveCapture ? window._driveCapture.getTitle() : '';") { titleRaw ->
+                val clean = titleRaw?.trim('"', '\\', ' ')?.takeIf { it.isNotBlank() && it != "null" }
+                if (clean != null && extractedTitle == null) {
+                    extractedTitle = clean
+                    onTitleExtracted?.invoke(clean)
+                }
+            }
+
+            // 2. Detect Total Pages
+            wv.evaluateJavascript("window._driveCapture ? window._driveCapture.getTotalCount() : 1;") { countRaw ->
+                val count = countRaw?.trim('"', ' ')?.toIntOrNull() ?: 1
+                if (count > 0) {
+                    totalDetectedPages = count
+                    onTotalPagesDetected?.invoke(count)
+                }
+            }
+
+            delay(300)
+            onStatusUpdate?.invoke("Starting exact page-by-page capture (Total: $totalDetectedPages detected)...")
+
+            var pageIndex = 0
+            var consecutiveMisses = 0
+            val maxLimit = 300
+
+            while (isExtracting && pageIndex < maxLimit) {
+                val pageDisplay = pageIndex + 1
+
+                // Scroll to exact page element and get bounding rect
+                val box = fetchPageBoundingBox(wv, pageIndex)
+
+                // Wait 450ms for Google Drive lazy load / image decode
+                delay(450)
+
+                // Quick image load check
+                val isReady = checkImageReady(wv, pageIndex)
+                if (!isReady) {
+                    delay(350)
+                }
+
+                // Capture exact real-size page screenshot
+                val tempFile = File(context.cacheDir, "drive_page_${System.currentTimeMillis()}_$pageDisplay.jpg")
+                val success = captureExactPageScreenshot(wv, box, tempFile)
+
+                if (success && tempFile.length() > 2048) {
+                    consecutiveMisses = 0
+                    capturedPageFiles.add(tempFile)
+
+                    val effectiveTotal = maxOf(totalDetectedPages, box?.totalDiscovered ?: 0, capturedPageFiles.size)
+                    val statusMsg = "Captured Page $pageDisplay of $effectiveTotal (Real-size page screenshot)..."
+                    
+                    onStatusUpdate?.invoke(statusMsg)
+                    onPageCaptured?.invoke(pageDisplay, effectiveTotal, statusMsg)
+
+                    // If we have reached the confirmed total pages, finish
+                    if (totalDetectedPages > 0 && capturedPageFiles.size >= totalDetectedPages) {
+                        Log.d(TAG, "All $totalDetectedPages pages captured successfully!")
+                        break
+                    }
+                } else {
+                    tempFile.delete()
+                    consecutiveMisses++
+                    if (consecutiveMisses >= 3) {
+                        Log.d(TAG, "Consecutive misses reached 3 at page $pageDisplay. Finishing capture.")
+                        break
+                    }
+                }
+
+                pageIndex++
+            }
+
+            // Compile the captured real-size screenshots into the PDF
+            if (capturedPageFiles.isNotEmpty()) {
+                compileCapturedFilesToPdf(capturedPageFiles.toList())
+            } else {
+                // Fallback to URL-based extraction if available
+                if (capturedPagesMap.isNotEmpty()) {
+                    val pagesList = capturedPagesMap.values.toList()
+                    onExtractionCompleted?.invoke(pagesList, extractedTitle, pagesList.firstOrNull())
+                } else {
+                    onError?.invoke("Could not capture document pages. Please ensure the document is viewable.")
+                }
             }
         }
-        mainHandler.postDelayed(finishDebounceRunnable!!, delayMs)
     }
 
-    private fun cancelFinishDebounce() {
-        finishDebounceRunnable?.let { mainHandler.removeCallbacks(it) }
-        finishDebounceRunnable = null
+    private suspend fun fetchPageBoundingBox(wv: WebView, pageIndex: Int): PageBoundingBox? = withContext(Dispatchers.Main) {
+        val deferred = kotlinx.coroutines.CompletableDeferred<PageBoundingBox?>()
+        wv.evaluateJavascript("window._driveCapture ? window._driveCapture.scrollToPage($pageIndex) : '{}';") { jsonResult ->
+            try {
+                val cleaned = jsonResult?.trim('"', '\\', ' ') ?: "{}"
+                val unescaped = jsonResult?.replace("\\\"", "\"")?.trim('"') ?: "{}"
+                val source = if (unescaped.startsWith("{")) unescaped else cleaned
+                val json = JSONObject(source)
+                val box = PageBoundingBox(
+                    found = json.optBoolean("found", true),
+                    left = json.optInt("left", 0),
+                    top = json.optInt("top", 0),
+                    width = json.optInt("width", wv.width.coerceAtLeast(1080)),
+                    height = json.optInt("height", wv.height.coerceAtLeast(1600)),
+                    totalDiscovered = json.optInt("totalDiscovered", 1)
+                )
+                deferred.complete(box)
+            } catch (e: Exception) {
+                deferred.complete(null)
+            }
+        }
+        deferred.await()
     }
 
-    private fun triggerCompletion() {
-        if (!isExtracting) return
-        isExtracting = false
-        cancelFinishDebounce()
+    private suspend fun checkImageReady(wv: WebView, pageIndex: Int): Boolean = withContext(Dispatchers.Main) {
+        val deferred = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        wv.evaluateJavascript("window._driveCapture ? window._driveCapture.isPageImageReady($pageIndex) : true;") { res ->
+            deferred.complete(res?.contains("true") == true)
+        }
+        deferred.await()
+    }
 
-        val pagesList = capturedPagesMap.values.toList()
-        val firstUrl = pagesList.firstOrNull()
+    private fun captureExactPageScreenshot(
+        wv: WebView,
+        box: PageBoundingBox?,
+        outputFile: File
+    ): Boolean {
+        return try {
+            val w = wv.width.coerceAtLeast(1080)
+            val h = wv.height.coerceAtLeast(1600)
+            val fullBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(fullBitmap)
+            wv.draw(canvas)
 
-        // Flush cookies to OkHttp
-        CookieManager.getInstance().flush()
+            // Precision crop: if page bounding box is found and has realistic page dimensions, crop to it
+            val cropBitmap: Bitmap = if (box != null && box.found && box.width > 200 && box.height > 200) {
+                val safeX = box.left.coerceIn(0, (w - 100).coerceAtLeast(0))
+                val safeY = box.top.coerceIn(0, (h - 100).coerceAtLeast(0))
+                val safeW = box.width.coerceIn(100, (w - safeX).coerceAtLeast(100))
+                val safeH = box.height.coerceIn(100, (h - safeY).coerceAtLeast(100))
+                Bitmap.createBitmap(fullBitmap, safeX, safeY, safeW, safeH)
+            } else {
+                fullBitmap
+            }
 
-        mainHandler.post {
-            val title = extractedTitle ?: webView?.title
-                ?.replace(" - Google Drive", "")
-                ?.replace(" - Google Docs", "")
-                ?.trim()
+            FileOutputStream(outputFile).use { out ->
+                cropBitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
+                out.flush()
+            }
 
-            onExtractionCompleted?.invoke(pagesList, title, firstUrl)
-            destroy()
+            if (cropBitmap != fullBitmap) {
+                cropBitmap.recycle()
+            }
+            fullBitmap.recycle()
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Error capturing page bitmap", e)
+            false
+        }
+    }
+
+    private fun compileCapturedFilesToPdf(files: List<File>) {
+        scope.launch(Dispatchers.IO) {
+            try {
+                withContext(Dispatchers.Main) {
+                    onStatusUpdate?.invoke("Compiling ${files.size} real-size page screenshots into native PDF...")
+                    onCompilingPdf?.invoke(1, files.size, 0.1f, "Compiling ${files.size} pages...")
+                }
+
+                val pdfCompiler = PdfCompiler()
+                val pdfBytes = pdfCompiler.compileImageFiles(files) { current, total ->
+                    val fraction = current.toFloat() / total.coerceAtLeast(1)
+                    scope.launch(Dispatchers.Main) {
+                        onCompilingPdf?.invoke(current, total, fraction, "Writing page $current of $total to PDF...")
+                    }
+                }
+
+                val title = extractedTitle ?: "Drive_Document_${System.currentTimeMillis()}"
+                val safeFileName = PdfStorageHelper.generateFileName(title)
+
+                // Save to public Downloads/DrivePDFs
+                val savedUri = PdfStorageHelper.savePdfToDownloads(context, pdfBytes, safeFileName).getOrNull()
+                val cacheFile = PdfStorageHelper.saveToAppCache(context, pdfBytes, safeFileName)
+
+                // Save record in History
+                val historyItem = DownloadHistoryItem(
+                    title = title,
+                    uriString = (savedUri ?: Uri.fromFile(cacheFile)).toString(),
+                    pageCount = files.size,
+                    fileSizeBytes = pdfBytes.size.toLong(),
+                    localPath = cacheFile.absolutePath,
+                    timestamp = System.currentTimeMillis()
+                )
+                HistoryRepository(context).addHistoryItem(historyItem)
+
+                // Clean up temporary image files
+                files.forEach { it.delete() }
+
+                withContext(Dispatchers.Main) {
+                    onStatusUpdate?.invoke("PDF Successfully Created (${files.size} pages)!")
+                    onPdfReady?.invoke(
+                        savedUri ?: Uri.fromFile(cacheFile),
+                        safeFileName,
+                        files.size,
+                        pdfBytes.size.toLong(),
+                        cacheFile.absolutePath
+                    )
+                    destroy()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "PDF compilation failed", e)
+                withContext(Dispatchers.Main) {
+                    onError?.invoke("Failed to compile PDF: ${e.localizedMessage}")
+                    destroy()
+                }
+            }
         }
     }
 
     fun forceCompileNow() {
-        if (capturedPagesMap.isNotEmpty()) {
-            triggerCompletion()
+        if (capturedPageFiles.isNotEmpty()) {
+            isExtracting = false
+            captureJob?.cancel()
+            compileCapturedFilesToPdf(capturedPageFiles.toList())
+        } else if (capturedPagesMap.isNotEmpty()) {
+            isExtracting = false
+            captureJob?.cancel()
+            val pagesList = capturedPagesMap.values.toList()
+            onExtractionCompleted?.invoke(pagesList, extractedTitle, pagesList.firstOrNull())
         } else {
             onError?.invoke("No document pages have been captured yet. Please wait a moment.")
         }
     }
 
-    private fun injectTitleScraper(view: WebView?) {
-        val jsScript = """
-            (function() {
-                try {
-                    var title = document.title || "";
-                    title = title.replace(" - Google Drive", "").replace(" - Google Docs", "").trim();
-                    var titleElem = document.querySelector('.ndfHFb-c4YZDc-s2gQvd') || 
-                                    document.querySelector('.drive-viewer-toolstrip-name') ||
-                                    document.querySelector('.drive-viewer-title');
-                    if (titleElem && titleElem.innerText) {
-                        title = titleElem.innerText.trim();
-                    }
-                    if (title) {
-                        window.DriveBridge.onTitleFound(title);
-                    }
-                } catch(e) {}
-            })();
-        """.trimIndent()
-
-        view?.evaluateJavascript(jsScript, null)
-    }
-
-    private fun injectAutoScroller(view: WebView?) {
-        val jsScript = """
-            (function() {
-                if (window._driveAutoScrollerActive) return;
-                window._driveAutoScrollerActive = true;
-
-                function getScrollContainer() {
-                    var selectors = [
-                        '.drive-viewer-paginated-scrollable',
-                        '.ndfHFb-c4YZDc-bN97Pc',
-                        '.ndfHFb-c4YZDc-Wrql6b',
-                        '.drive-viewer-content',
-                        '[role="main"]',
-                        '.drive-viewer-toolstrip'
-                    ];
-                    for (var i = 0; i < selectors.length; i++) {
-                        var el = document.querySelector(selectors[i]);
-                        if (el && el.scrollHeight > el.clientHeight + 40) {
-                            return el;
-                        }
-                    }
-                    var divs = document.querySelectorAll('div');
-                    for (var j = 0; j < divs.length; j++) {
-                        var d = divs[j];
-                        if (d.scrollHeight > d.clientHeight + 80) {
-                            var style = window.getComputedStyle(d);
-                            if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
-                                return d;
-                            }
-                        }
-                    }
-                    return document.scrollingElement || document.documentElement || document.body;
-                }
-
-                function scrapeDomImages() {
-                    var imgs = document.querySelectorAll('img');
-                    for (var i = 0; i < imgs.length; i++) {
-                        var img = imgs[i];
-                        var src = img.src || img.getAttribute('src') || img.getAttribute('data-src');
-                        if (src && (src.indexOf('viewer') !== -1 || src.indexOf('googleusercontent') !== -1 || src.indexOf('drive') !== -1)) {
-                            var pageIdx = -1;
-                            var parent = img.closest('[data-page-index], [data-page-number], .drive-viewer-paginated-page');
-                            if (parent) {
-                                var idx = parent.getAttribute('data-page-index') || parent.getAttribute('data-page-number');
-                                if (idx) pageIdx = parseInt(idx, 10);
-                            }
-                            if (window.DriveBridge && window.DriveBridge.onPageImageFound) {
-                                window.DriveBridge.onPageImageFound(src, pageIdx);
-                            }
-                        }
-                    }
-
-                    var bgElements = document.querySelectorAll('[style*="background-image"], [style*="drive-viewer"]');
-                    for (var k = 0; k < bgElements.length; k++) {
-                        var bgStyle = bgElements[k].style.backgroundImage;
-                        if (bgStyle && bgStyle.indexOf('url(') !== -1) {
-                            var match = /url\(['"]?(.*?)['"]?\)/.exec(bgStyle);
-                            if (match && match[1]) {
-                                var bgUrl = match[1];
-                                if (bgUrl.indexOf('viewer') !== -1 || bgUrl.indexOf('googleusercontent') !== -1) {
-                                    if (window.DriveBridge && window.DriveBridge.onPageImageFound) {
-                                        window.DriveBridge.onPageImageFound(bgUrl, -1);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                function scrapeTotalPageCount() {
-                    var textNodes = document.querySelectorAll('.drive-viewer-toolstrip, .ndfHFb-c4YZDc-j7LFlb, div, span');
-                    for (var i = 0; i < textNodes.length; i++) {
-                        var txt = textNodes[i].innerText || "";
-                        var match = /(?:of|\/)\s*(\d+)/i.exec(txt);
-                        if (match && match[1]) {
-                            var total = parseInt(match[1], 10);
-                            if (total > 0 && total < 1000) {
-                                if (window.DriveBridge && window.DriveBridge.onTotalPagesDetected) {
-                                    window.DriveBridge.onTotalPagesDetected(total);
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                var initAttempts = 0;
-                var initInterval = setInterval(function() {
-                    initAttempts++;
-                    scrapeDomImages();
-                    scrapeTotalPageCount();
-                    var el = getScrollContainer();
-                    var hasImages = document.querySelectorAll('img').length > 0;
-                    
-                    if (hasImages || (el && el.scrollHeight > el.clientHeight + 80) || initAttempts >= 6) {
-                        clearInterval(initInterval);
-                        startContinuousScroll();
-                    }
-                }, 350);
-
-                function startContinuousScroll() {
-                    var stagnantCycles = 0;
-                    var lastScrollTop = -1;
-                    var totalScrollSteps = 0;
-                    
-                    var scrollTimer = setInterval(function() {
-                        scrapeDomImages();
-                        scrapeTotalPageCount();
-                        var el = getScrollContainer();
-
-                        var curScroll = el.scrollTop || window.pageYOffset || 0;
-                        var maxScroll = (el.scrollHeight || document.body.scrollHeight) - (el.clientHeight || window.innerHeight);
-
-                        totalScrollSteps++;
-
-                        var atBottom = (maxScroll > 0 && curScroll >= maxScroll - 60);
-                        var scrollStuck = (curScroll === lastScrollTop && totalScrollSteps > 8);
-
-                        if (atBottom || scrollStuck) {
-                            stagnantCycles++;
-                            if (stagnantCycles >= 6) {
-                                clearInterval(scrollTimer);
-                                scrapeDomImages();
-                                if (window.DriveBridge && window.DriveBridge.onScrollFinished) {
-                                    window.DriveBridge.onScrollFinished();
-                                }
-                                return;
-                            }
-                        } else {
-                            stagnantCycles = 0;
-                        }
-                        lastScrollTop = curScroll;
-
-                        var step = Math.max(400, (el.clientHeight || window.innerHeight || 800) * 0.85);
-                        if (el.scrollTop !== undefined && el.scrollHeight > el.clientHeight) {
-                            el.scrollTop = curScroll + step;
-                        }
-                        window.scrollBy(0, step);
-                        try {
-                            el.dispatchEvent(new WheelEvent('wheel', { deltaY: step, bubbles: true }));
-                        } catch(e) {}
-                    }, 400);
-                }
-            })();
-        """.trimIndent()
-
-        view?.evaluateJavascript(jsScript, null)
-    }
-
     fun destroy() {
         isExtracting = false
-        cancelFinishDebounce()
+        captureJob?.cancel()
         mainHandler.post {
             try {
                 webView?.stopLoading()
@@ -559,6 +711,7 @@ class DriveExtractorEngine(
         @JavascriptInterface
         fun onTotalPagesDetected(total: Int) {
             if (total > 0) {
+                totalDetectedPages = total
                 mainHandler.post {
                     onTotalPagesDetected?.invoke(total)
                 }
@@ -569,15 +722,6 @@ class DriveExtractorEngine(
         fun onPageImageFound(url: String, pageIndex: Int) {
             if (url.isNotBlank() && isDriveViewerImageUrl(url)) {
                 handleImageDiscovered(url, if (pageIndex >= 0) pageIndex + 1 else null)
-            }
-        }
-
-        @JavascriptInterface
-        fun onScrollFinished() {
-            Log.d(TAG, "JS reported scroll finished. Captured count: ${capturedPagesMap.size}")
-            isScrollCompleted = true
-            if (capturedPagesMap.isNotEmpty()) {
-                scheduleFinishDebounce(1200L)
             }
         }
     }
