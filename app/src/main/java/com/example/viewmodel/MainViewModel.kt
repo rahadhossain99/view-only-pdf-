@@ -13,13 +13,16 @@ import com.example.data.model.DownloadState
 import com.example.data.model.EngineTelemetry
 import com.example.data.model.ExtractionEngineMode
 import com.example.data.model.PageItem
+import com.example.data.model.PdfCompressionLevel
 import com.example.data.model.PdfPageEditItem
 import com.example.data.model.ResolutionQuality
 import com.example.data.model.WorkspaceTab
 import com.example.data.storage.HistoryRepository
 import com.example.data.storage.PdfStorageHelper
 import com.example.engine.DriveExtractorEngine
+import com.example.engine.PdfCompiler
 import com.example.engine.PdfOrganizerEngine
+import com.example.service.DownloadNotificationHelper
 import com.example.service.PdfDownloadService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -54,7 +57,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _inputUrl = MutableStateFlow("")
     val inputUrl: StateFlow<String> = _inputUrl.asStateFlow()
 
-    private val _resolutionQuality = MutableStateFlow(ResolutionQuality.ULTRA)
+    private val _customFileName = MutableStateFlow("")
+    val customFileName: StateFlow<String> = _customFileName.asStateFlow()
+
+    // Default to Balanced (HIGH) for fast download and compact 3-7 MB file size
+    private val _resolutionQuality = MutableStateFlow(ResolutionQuality.HIGH)
     val resolutionQuality: StateFlow<ResolutionQuality> = _resolutionQuality.asStateFlow()
 
     private val _engineMode = MutableStateFlow(ExtractionEngineMode.AUTO_HYBRID)
@@ -74,6 +81,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _currentDocumentTitle = MutableStateFlow<String?>(null)
     val currentDocumentTitle: StateFlow<String?> = _currentDocumentTitle.asStateFlow()
+
+    // Post-creation PDF size reducer / compressor state
+    private val _isCompressingPdf = MutableStateFlow(false)
+    val isCompressingPdf: StateFlow<Boolean> = _isCompressingPdf.asStateFlow()
+
+    private val _compressionStatus = MutableStateFlow<String?>(null)
+    val compressionStatus: StateFlow<String?> = _compressionStatus.asStateFlow()
 
     // Built-in PDF Viewer & Page Organizer Studio State
     private val _studioPdfFile = MutableStateFlow<File?>(null)
@@ -106,10 +120,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (serviceState !is DownloadState.Idle) {
                     _downloadState.value = serviceState
                     if (serviceState is DownloadState.Success) {
+                        val cleanName = serviceState.fileName.removeSuffix(".pdf")
+                        if (_customFileName.value.isBlank()) {
+                            _customFileName.value = cleanName
+                        }
                         preloadPdfForStudio(
                             uri = serviceState.uri,
                             localPath = serviceState.localPath,
-                            title = serviceState.fileName.removeSuffix(".pdf")
+                            title = cleanName
                         )
                     }
                 }
@@ -123,6 +141,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateUrl(url: String) {
         _inputUrl.value = url
+    }
+
+    fun updateCustomFileName(name: String) {
+        _customFileName.value = name
     }
 
     fun setResolution(quality: ResolutionQuality) {
@@ -156,7 +178,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun startDownload(rawUrl: String = _inputUrl.value) {
         val cleanUrl = rawUrl.trim()
         if (cleanUrl.isBlank()) {
-            _downloadState.value = DownloadState.Error("Please enter a valid Google Drive or PDF URL.")
+            _downloadState.value = DownloadState.Error("অনুগ্রহ করে একটি সঠিক Google Drive বা PDF লিংক দিন।")
             return
         }
 
@@ -164,15 +186,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         PdfDownloadService.resetState()
         _discoveredPages.value = emptyList()
         _currentDocumentTitle.value = null
+        _compressionStatus.value = null
+
+        val initialName = _customFileName.value.trim().ifBlank { "Drive_PDF" }
+        DownloadNotificationHelper.showProgress(
+            context = context,
+            docName = initialName,
+            percent = 2,
+            detailText = "Connecting to Google Drive document..."
+        )
+
         _engineTelemetry.value = EngineTelemetry(
             activeMode = _engineMode.value,
             activeTierName = "Tier 1: Stream & Export Probe",
             lastLogMessage = "Probing direct stream & initializing ${_engineMode.value.shortBadge}..."
         )
-        _downloadState.value = DownloadState.LoadingWebView(cleanUrl, "Connecting to document...")
+        _downloadState.value = DownloadState.LoadingWebView(cleanUrl, "Connecting to document (2%)...")
 
         viewModelScope.launch {
-            // Tier 1: Check if direct PDF export stream is available (for AUTO_HYBRID or STREAM_BLOB_INTERCEPTOR)
             val fileId = DriveExtractorEngine.extractFileId(cleanUrl)
             var directPdfUrl: String? = null
 
@@ -186,23 +217,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             if (directPdfUrl != null) {
-                Log.d("MainViewModel", "Direct PDF export stream available! Starting direct download.")
-                _engineTelemetry.value = _engineTelemetry.value.copy(
-                    activeTierName = "Tier 1: Direct PDF Stream",
-                    interceptedStreams = 1,
-                    lastLogMessage = "Direct native PDF stream detected! Downloading directly..."
-                )
+                val chosenTitle = _customFileName.value.trim().takeIf { it.isNotBlank() } ?: _currentDocumentTitle.value
                 _downloadState.value = DownloadState.DownloadingImages(
                     current = 1,
                     total = 1,
                     percent = 0.25f,
-                    message = "Direct PDF stream detected. Downloading native PDF..."
+                    message = "Direct PDF stream detected. Downloading..."
                 )
-                PdfDownloadService.startDirectPdfDownload(context, directPdfUrl, _currentDocumentTitle.value)
+                PdfDownloadService.startDirectPdfDownload(context, directPdfUrl, chosenTitle)
                 return@launch
             }
 
-            // Otherwise, start the 4-Tier Multi-Engine Browser Extractor
             startBrowserPageExtraction(cleanUrl)
         }
     }
@@ -224,7 +249,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 return@withContext candidateUrl
             }
         } catch (e: Exception) {
-            Log.d("MainViewModel", "Direct check did not succeed, using multi-engine extractor: ${e.localizedMessage}")
+            Log.d("MainViewModel", "Direct check did not succeed: ${e.localizedMessage}")
         }
         return@withContext null
     }
@@ -244,6 +269,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val engine = DriveExtractorEngine(context, viewModelScope)
         extractorEngine = engine
 
+        engine.customTitleProvider = {
+            _customFileName.value.trim().takeIf { it.isNotBlank() }
+        }
+
         engine.onTelemetryUpdate = { telemetry ->
             _engineTelemetry.value = telemetry
         }
@@ -261,6 +290,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         engine.onTitleExtracted = { title ->
             _currentDocumentTitle.value = title
+            if (_customFileName.value.isBlank()) {
+                _customFileName.value = title.removeSuffix(".pdf")
+            }
         }
 
         engine.onTotalPagesDetected = { total ->
@@ -268,7 +300,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (currentState is DownloadState.InterceptingPages) {
                 _downloadState.value = currentState.copy(
                     estimatedTotal = maxOf(currentState.estimatedTotal, total),
-                    message = "Scanning document pages (Total: $total detected)..."
+                    message = "Detected $total pages..."
                 )
             }
         }
@@ -289,10 +321,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         engine.onPageCaptured = { pageNum, total, msg ->
+            val safeTotal = total.coerceAtLeast(pageNum).coerceAtLeast(1)
+            val pct = (pageNum.toFloat() / safeTotal.toFloat()).coerceIn(0.04f, 0.90f)
             _downloadState.value = DownloadState.DownloadingImages(
                 current = pageNum,
-                total = total,
-                percent = pageNum.toFloat() / total.coerceAtLeast(1),
+                total = safeTotal,
+                percent = pct,
                 message = msg
             )
         }
@@ -307,6 +341,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         engine.onPdfReady = { uri, fileName, pageCount, fileSizeBytes, localPath ->
+            val cleanBaseName = fileName.removeSuffix(".pdf")
+            if (_customFileName.value.isBlank()) {
+                _customFileName.value = cleanBaseName
+            }
             _downloadState.value = DownloadState.Success(
                 uri = uri,
                 fileName = fileName,
@@ -314,12 +352,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 fileSizeBytes = fileSizeBytes,
                 localPath = localPath
             )
-            preloadPdfForStudio(uri, localPath, fileName.removeSuffix(".pdf"))
+            preloadPdfForStudio(uri, localPath, cleanBaseName)
             extractorEngine = null
         }
 
         engine.onExtractionCompleted = { pageUrls, title, baseTemplateUrl ->
-            val docTitle = title ?: _currentDocumentTitle.value
+            val docTitle = _customFileName.value.trim().takeIf { it.isNotBlank() }
+                ?: title
+                ?: _currentDocumentTitle.value
             _currentDocumentTitle.value = docTitle
 
             if (pageUrls.size > 1) {
@@ -327,7 +367,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     current = 1,
                     total = pageUrls.size,
                     percent = 0.05f,
-                    message = "Downloading ${pageUrls.size} high-resolution page tiles..."
+                    message = "Downloading ${pageUrls.size} pages..."
                 )
                 PdfDownloadService.startDownloadWithUrls(
                     context = context,
@@ -339,8 +379,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _downloadState.value = DownloadState.CompilingPdf(
                     currentPage = 1,
                     totalPages = 1,
-                    percent = 0f,
-                    message = "Starting resilient smart page probe..."
+                    percent = 0.1f,
+                    message = "Probing all document pages..."
                 )
                 PdfDownloadService.startProbeDownload(
                     context = context,
@@ -349,9 +389,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     resolution = _resolutionQuality.value
                 )
             } else {
+                DownloadNotificationHelper.cancelProgress(context)
                 _downloadState.value = DownloadState.Error(
-                    message = "No pages could be extracted from this document.",
-                    details = "Try opening Interactive Mode to sign in or verify document permissions."
+                    message = "এই লিংক থেকে পেজ পাওয়া যায়নি।",
+                    details = "লিঙ্কটি ভিউ-অনলি বা প্রাইভেট হলে প্রিভিউ মোডে লগইন করে আবার চেষ্টা করুন।"
                 )
             }
 
@@ -360,9 +401,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         engine.onError = { errorMsg ->
+            DownloadNotificationHelper.cancelProgress(context)
             _downloadState.value = DownloadState.Error(
                 message = errorMsg,
-                details = "Make sure the link is accessible or open Interactive Mode to sign in."
+                details = "Make sure the link is accessible or sign in via Browser Preview."
             )
             engine.destroy()
             extractorEngine = null
@@ -384,13 +426,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun startDownloadWithPages(pageUrls: List<String>, title: String?) {
         if (pageUrls.isEmpty()) return
         cancelDownload()
-        val docTitle = title ?: _currentDocumentTitle.value
+        val docTitle = _customFileName.value.trim().takeIf { it.isNotBlank() }
+            ?: title
+            ?: _currentDocumentTitle.value
         _currentDocumentTitle.value = docTitle
         _downloadState.value = DownloadState.DownloadingImages(
             current = 1,
             total = pageUrls.size,
             percent = 0.05f,
-            message = "Starting download of ${pageUrls.size} document pages..."
+            message = "Starting download of ${pageUrls.size} pages..."
         )
         PdfDownloadService.startDownloadWithUrls(
             context = context,
@@ -405,7 +449,123 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         extractorEngine = null
         PdfDownloadService.cancelDownload(context)
         PdfDownloadService.resetState()
+        DownloadNotificationHelper.cancelProgress(context)
         _downloadState.value = DownloadState.Idle
+    }
+
+    /**
+     * Renames the already-created PDF file in Downloads/DrivePDFs & local cache,
+     * and updates both UI state and the top completion notification.
+     */
+    fun renameCompletedPdf(newRawName: String) {
+        val currentState = _downloadState.value as? DownloadState.Success ?: return
+        val trimmed = newRawName.trim()
+        if (trimmed.isBlank()) return
+
+        _customFileName.value = trimmed.removeSuffix(".pdf")
+
+        viewModelScope.launch {
+            val cacheFile = currentState.localPath?.let { File(it) }
+            val (newUri, newFileName) = withContext(Dispatchers.IO) {
+                PdfStorageHelper.renameSavedPdf(
+                    context = context,
+                    currentUri = currentState.uri,
+                    localPath = currentState.localPath,
+                    newTitle = trimmed
+                )
+            }
+            _downloadState.value = currentState.copy(
+                uri = newUri,
+                fileName = newFileName
+            )
+            _compressionStatus.value = "নাম পরিবর্তন করে '$newFileName' রাখা হয়েছে"
+            DownloadNotificationHelper.showCompleted(
+                context = context,
+                fileName = newFileName,
+                pageCount = currentState.pageCount,
+                fileSizeBytes = currentState.fileSizeBytes,
+                uri = newUri,
+                cacheFile = cacheFile
+            )
+        }
+    }
+
+    /**
+     * Compresses an already-created PDF (e.g., if it is 55 MB or 100 MB+ or user wants a smaller size)
+     * into a lightweight native JPEG-stream PDF.
+     */
+    fun compressCompletedPdf(level: PdfCompressionLevel) {
+        val currentState = _downloadState.value as? DownloadState.Success ?: return
+        if (_isCompressingPdf.value) return
+
+        viewModelScope.launch {
+            _isCompressingPdf.value = true
+            _compressionStatus.value = "${level.title} সাইজে কমানো হচ্ছে (0%)..."
+
+            try {
+                val sourceFile = withContext(Dispatchers.IO) {
+                    pdfOrganizerEngine.resolveSeekableFile(currentState.uri, currentState.localPath)
+                }
+
+                if (sourceFile == null || !sourceFile.exists()) {
+                    _compressionStatus.value = "পিডিএফ ফাইলটি পাওয়া যায়নি।"
+                    _isCompressingPdf.value = false
+                    return@launch
+                }
+
+                val originalBytesSize = currentState.fileSizeBytes
+                val compressedBytes = PdfCompiler.compressExistingPdf(
+                    sourcePdfFile = sourceFile,
+                    level = level
+                ) { page, total ->
+                    val pct = ((page.toFloat() / total.coerceAtLeast(1)) * 100f).toInt().coerceIn(1, 99)
+                    _compressionStatus.value = "পেজ $page/$total অপ্টিমাইজ হচ্ছে ($pct%)..."
+                }
+
+                if (compressedBytes.isNotEmpty()) {
+                    val baseTitle = _customFileName.value.trim().ifBlank {
+                        currentState.fileName.removeSuffix(".pdf")
+                    }
+                    val finalFileName = PdfStorageHelper.generateFileName(baseTitle)
+                    val savedUri = withContext(Dispatchers.IO) {
+                        PdfStorageHelper.savePdfToDownloads(context, compressedBytes, finalFileName).getOrNull()
+                    }
+                    val cacheFile = withContext(Dispatchers.IO) {
+                        PdfStorageHelper.saveToAppCache(context, compressedBytes, finalFileName)
+                    }
+                    val finalUri = savedUri ?: Uri.fromFile(cacheFile)
+                    val newSize = compressedBytes.size.toLong()
+
+                    _downloadState.value = currentState.copy(
+                        uri = finalUri,
+                        fileName = finalFileName,
+                        fileSizeBytes = newSize,
+                        localPath = cacheFile.absolutePath,
+                        previousSizeBytes = originalBytesSize
+                    )
+
+                    val oldFormatted = PdfStorageHelper.formatFileSize(originalBytesSize)
+                    val newFormatted = PdfStorageHelper.formatFileSize(newSize)
+                    _compressionStatus.value = "সাইজ কমানো সম্পন্ন: $oldFormatted → $newFormatted"
+
+                    DownloadNotificationHelper.showCompleted(
+                        context = context,
+                        fileName = finalFileName,
+                        pageCount = currentState.pageCount,
+                        fileSizeBytes = newSize,
+                        uri = finalUri,
+                        cacheFile = cacheFile
+                    )
+                } else {
+                    _compressionStatus.value = "সাইজ কমানো সম্ভব হয়নি।"
+                }
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "Error compressing PDF", e)
+                _compressionStatus.value = "ত্রুটি: ${e.localizedMessage}"
+            } finally {
+                _isCompressingPdf.value = false
+            }
+        }
     }
 
     // --- Built-in PDF Viewer & Page Organizer Studio Methods ---
@@ -493,7 +653,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val activeCount = _studioPageEdits.value.count { !it.isDeleted }
         _studioPageEdits.value = _studioPageEdits.value.map { item ->
             if (item.id == pageId) {
-                // Prevent deleting the very last remaining page
                 if (!item.isDeleted && activeCount <= 1) item else item.copy(isDeleted = !item.isDeleted)
             } else {
                 item
@@ -535,7 +694,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (keptCount == 0) return
 
         _isStudioLoading.value = true
-        _studioExportMessage.value = "Exporting $keptCount organized pages to native A4 PDF..."
+        _studioExportMessage.value = "Exporting $keptCount organized pages to compact PDF..."
 
         viewModelScope.launch {
             try {
@@ -559,7 +718,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                     historyRepository.addHistoryItem(historyItem)
 
-                    // Reload the newly saved file as the active studio file
                     _studioPdfFile.value = cacheFile
                     _studioPageEdits.value = (0 until keptCount).map { idx ->
                         PdfPageEditItem(originalPageIndex = idx)
@@ -579,6 +737,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun openPdf(uri: Uri, localPath: String? = null) {
         val fallbackFile = localPath?.let { File(it) }
         PdfStorageHelper.openPdf(context, uri, fallbackFile)
+    }
+
+    fun openInFiles(uri: Uri, localPath: String? = null) {
+        val fallbackFile = localPath?.let { File(it) }
+        PdfStorageHelper.openInFiles(context, uri, fallbackFile)
     }
 
     fun sharePdf(uri: Uri, localPath: String? = null, title: String = "Drive PDF") {

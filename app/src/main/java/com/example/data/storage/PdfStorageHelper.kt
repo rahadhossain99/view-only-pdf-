@@ -1,5 +1,6 @@
 package com.example.data.storage
 
+import android.app.DownloadManager
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -7,11 +8,10 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.widget.Toast
 import androidx.core.content.FileProvider
 import java.io.File
 import java.io.FileOutputStream
-import java.io.InputStream
-import java.io.OutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -19,13 +19,19 @@ import java.util.Locale
 object PdfStorageHelper {
 
     fun generateFileName(customTitle: String? = null): String {
-        val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-        val cleanTitle = customTitle?.trim()?.replace(Regex("[^a-zA-Z0-9._-]"), "_")
-            ?.take(40)
-        return if (!cleanTitle.isNullOrBlank()) {
-            "Drive_${cleanTitle}_$timeStamp.pdf"
+        val cleaned = customTitle
+            ?.trim()
+            ?.removeSuffix(".pdf")
+            ?.removeSuffix(".PDF")
+            ?.replace(Regex("[/\\\\:*?\"<>|\\r\\n\\t]"), "_")
+            ?.trim()
+            ?.take(65)
+
+        return if (!cleaned.isNullOrBlank()) {
+            "$cleaned.pdf"
         } else {
-            "DriveDoc_$timeStamp.pdf"
+            val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+            "SketchPDF_$timeStamp.pdf"
         }
     }
 
@@ -39,13 +45,14 @@ object PdfStorageHelper {
         fileName: String
     ): Result<Uri> {
         return runCatching {
+            val safeName = if (fileName.endsWith(".pdf", ignoreCase = true)) fileName else "$fileName.pdf"
             val resolver = context.contentResolver
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val contentValues = ContentValues().apply {
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, safeName)
                     put(MediaStore.MediaColumns.MIME_TYPE, "application/pdf")
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/DrivePDFs")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
                     put(MediaStore.MediaColumns.IS_PENDING, 1)
                 }
 
@@ -64,13 +71,11 @@ object PdfStorageHelper {
 
                 itemUri
             } else {
-                // Legacy Android (API < 29)
                 val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                val targetDir = File(downloadsDir, "DrivePDFs")
-                if (!targetDir.exists()) {
-                    targetDir.mkdirs()
+                if (!downloadsDir.exists()) {
+                    downloadsDir.mkdirs()
                 }
-                val destFile = File(targetDir, fileName)
+                val destFile = File(downloadsDir, safeName)
                 FileOutputStream(destFile).use { fos ->
                     fos.write(pdfBytes)
                     fos.flush()
@@ -81,14 +86,15 @@ object PdfStorageHelper {
     }
 
     /**
-     * Also saves a cached copy for fast preview/in-app opening via FileProvider
+     * Saves a cached copy for fast compression, renaming, and FileProvider opening.
      */
     fun saveToAppCache(context: Context, pdfBytes: ByteArray, fileName: String): File {
+        val safeName = if (fileName.endsWith(".pdf", ignoreCase = true)) fileName else "$fileName.pdf"
         val cacheDir = File(context.cacheDir, "saved_pdfs")
         if (!cacheDir.exists()) {
             cacheDir.mkdirs()
         }
-        val file = File(cacheDir, fileName)
+        val file = File(cacheDir, safeName)
         FileOutputStream(file).use { fos ->
             fos.write(pdfBytes)
             fos.flush()
@@ -96,7 +102,55 @@ object PdfStorageHelper {
         return file
     }
 
-    fun openPdf(context: Context, uri: Uri, fallbackFile: File? = null) {
+    /**
+     * Renames an existing saved PDF in both Downloads (MediaStore) and local cache.
+     */
+    fun renameSavedPdf(
+        context: Context,
+        currentUri: Uri,
+        localPath: String?,
+        newTitle: String
+    ): Pair<Uri, String> {
+        val newFileName = generateFileName(newTitle)
+        var updatedUri = currentUri
+
+        try {
+            if (currentUri.scheme == "content" && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, newFileName)
+                }
+                val rows = context.contentResolver.update(currentUri, values, null, null)
+                if (rows <= 0 && localPath != null && File(localPath).exists()) {
+                    val bytes = File(localPath).readBytes()
+                    updatedUri = savePdfToDownloads(context, bytes, newFileName).getOrDefault(currentUri)
+                }
+            } else if (localPath != null && File(localPath).exists()) {
+                val bytes = File(localPath).readBytes()
+                updatedUri = savePdfToDownloads(context, bytes, newFileName).getOrDefault(currentUri)
+            }
+        } catch (e: Exception) {
+            if (localPath != null && File(localPath).exists()) {
+                val bytes = File(localPath).readBytes()
+                updatedUri = savePdfToDownloads(context, bytes, newFileName).getOrDefault(currentUri)
+            }
+        }
+
+        return Pair(updatedUri, newFileName)
+    }
+
+    fun buildOpenInFilesIntent(context: Context, uri: Uri, fallbackFile: File? = null): Intent {
+        val downloadsIntent = Intent(DownloadManager.ACTION_VIEW_DOWNLOADS).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        }
+        val pm = context.packageManager
+        return if (downloadsIntent.resolveActivity(pm) != null) {
+            downloadsIntent
+        } else {
+            buildOpenPdfIntent(context, uri, fallbackFile)
+        }
+    }
+
+    fun buildOpenPdfIntent(context: Context, uri: Uri, fallbackFile: File? = null): Intent {
         val targetUri = try {
             if (uri.scheme == "content") {
                 uri
@@ -113,17 +167,41 @@ object PdfStorageHelper {
             uri
         }
 
-        val intent = Intent(Intent.ACTION_VIEW).apply {
+        return Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(targetUri, "application/pdf")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
+    }
 
-        val chooser = Intent.createChooser(intent, "Open PDF with").apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    /**
+     * Takes the user directly into the Android system Files / Downloads folder.
+     */
+    fun openInFiles(context: Context, uri: Uri, fallbackFile: File? = null) {
+        try {
+            val downloadsIntent = Intent(DownloadManager.ACTION_VIEW_DOWNLOADS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(downloadsIntent)
+        } catch (e: Exception) {
+            try {
+                openPdf(context, uri, fallbackFile)
+            } catch (ex: Exception) {
+                Toast.makeText(context, "Saved in Downloads folder", Toast.LENGTH_SHORT).show()
+            }
         }
+    }
 
-        context.startActivity(chooser)
+    fun openPdf(context: Context, uri: Uri, fallbackFile: File? = null) {
+        try {
+            val intent = buildOpenPdfIntent(context, uri, fallbackFile)
+            val chooser = Intent.createChooser(intent, "Open PDF").apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(chooser)
+        } catch (e: Exception) {
+            openInFiles(context, uri, fallbackFile)
+        }
     }
 
     fun sharePdf(context: Context, uri: Uri, fallbackFile: File? = null, title: String = "Share PDF") {
@@ -150,7 +228,7 @@ object PdfStorageHelper {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
 
-        val chooser = Intent.createChooser(shareIntent, "Share PDF document via").apply {
+        val chooser = Intent.createChooser(shareIntent, "Share PDF via").apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
 

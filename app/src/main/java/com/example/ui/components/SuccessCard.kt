@@ -1,6 +1,8 @@
 package com.example.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,59 +13,90 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AutoFixHigh
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Compress
 import androidx.compose.material.icons.filled.Description
-import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.DriveFileRenameOutline
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.SuggestionChip
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.example.data.model.DownloadState
+import com.example.data.model.PdfCompressionLevel
 import com.example.data.storage.PdfStorageHelper
+import com.example.ui.theme.SketchCard
+import com.example.ui.theme.SketchCreamWash
+import com.example.ui.theme.SketchForestInk
+import com.example.ui.theme.SketchGraphite
+import com.example.ui.theme.SketchInkBlack
+import com.example.ui.theme.SketchMarkerYellow
+import com.example.ui.theme.SketchMintWash
+import com.example.ui.theme.SketchPenBlueWash
 
 @Composable
 fun SuccessCard(
     successState: DownloadState.Success,
+    isCompressing: Boolean = false,
+    compressionStatus: String? = null,
+    onRenamePdf: (String) -> Unit = {},
+    onCompressPdf: (PdfCompressionLevel) -> Unit = {},
+    onOpenInFiles: () -> Unit = {},
     onOpenPdf: () -> Unit,
     onSharePdf: () -> Unit,
     onOpenInStudio: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    Card(
+    var editableName by remember(successState.fileName) {
+        mutableStateOf(successState.fileName.removeSuffix(".pdf"))
+    }
+
+    LaunchedEffect(successState.fileName) {
+        editableName = successState.fileName.removeSuffix(".pdf")
+    }
+
+    SketchCard(
         modifier = modifier
             .fillMaxWidth()
             .testTag("download_success_card"),
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f)
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        containerColor = Color.White,
+        borderColor = SketchInkBlack,
+        shadowColor = SketchInkBlack,
+        cornerRadius = 16.dp,
+        shadowOffset = 4.dp
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(20.dp),
+                .padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
+            // 1. Success Header with 100% Stamp
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -71,164 +104,360 @@ fun SuccessCard(
                 Box(
                     modifier = Modifier
                         .size(44.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.secondary),
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(SketchMintWash)
+                        .border(2.dp, SketchInkBlack, RoundedCornerShape(10.dp)),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = Icons.Default.CheckCircle,
                         contentDescription = "Success",
-                        tint = MaterialTheme.colorScheme.onSecondary,
-                        modifier = Modifier.size(24.dp)
+                        tint = SketchForestInk,
+                        modifier = Modifier.size(26.dp)
                     )
                 }
 
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "PDF Extracted & Saved!",
+                        text = "পিডিএফ তৈরি সম্পন্ন (100%)",
                         style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface
+                        fontWeight = FontWeight.ExtraBold,
+                        color = SketchInkBlack
                     )
                     Text(
                         text = successState.fileName,
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontWeight = FontWeight.SemiBold,
+                        color = SketchGraphite,
                         maxLines = 1
                     )
                 }
             }
 
-            // Badges row (Pages, File Size, Storage Folder)
+            // 2. Sketch Info Badges (Pages, Current File Size, Before/After Savings)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                SuggestionChip(
-                    onClick = {},
-                    label = {
-                        Text(
-                            text = "${successState.pageCount} Pages",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    },
-                    icon = {
-                        Icon(
-                            imageVector = Icons.Default.Description,
-                            contentDescription = "Pages",
-                            modifier = Modifier.size(14.dp)
-                        )
-                    },
-                    shape = RoundedCornerShape(8.dp)
+                SketchBadge(
+                    text = "${successState.pageCount} পেজ",
+                    backgroundColor = SketchCreamWash
                 )
-
-                SuggestionChip(
-                    onClick = {},
-                    label = {
-                        Text(
-                            text = PdfStorageHelper.formatFileSize(successState.fileSizeBytes),
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    },
-                    shape = RoundedCornerShape(8.dp)
+                SketchBadge(
+                    text = "সাইজ: ${PdfStorageHelper.formatFileSize(successState.fileSizeBytes)}",
+                    backgroundColor = SketchMarkerYellow
                 )
-
-                SuggestionChip(
-                    onClick = {},
-                    label = {
-                        Text(
-                            text = "Downloads/DrivePDFs",
-                            style = MaterialTheme.typography.labelSmall,
-                            maxLines = 1
-                        )
-                    },
-                    icon = {
-                        Icon(
-                            imageVector = Icons.Default.Folder,
-                            contentDescription = "Folder",
-                            modifier = Modifier.size(14.dp)
-                        )
-                    },
-                    shape = RoundedCornerShape(8.dp)
-                )
-            }
-
-            // Built-in PDF Viewer & Page Organizer Studio Action
-            if (onOpenInStudio != null) {
-                Button(
-                    onClick = onOpenInStudio,
-                    shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp)
-                        .testTag("open_in_pdf_studio_button"),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary
-                    )
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.AutoFixHigh,
-                        contentDescription = "Open in Built-in PDF Studio",
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "View & Organize Pages in PDF Studio",
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.Bold
+                if (successState.previousSizeBytes != null && successState.previousSizeBytes > successState.fileSizeBytes) {
+                    SketchBadge(
+                        text = "আগে ছিল: ${PdfStorageHelper.formatFileSize(successState.previousSizeBytes)}",
+                        backgroundColor = SketchMintWash
                     )
                 }
             }
 
-            // Secondary Action buttons (Share & External PDF App)
+            // 3. Inline PDF Rename Box (পিডিএফ-এর নাম পরিবর্তন করুন)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(SketchCreamWash.copy(alpha = 0.5f))
+                    .border(1.4.dp, SketchInkBlack, RoundedCornerShape(12.dp))
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.DriveFileRenameOutline,
+                        contentDescription = null,
+                        tint = SketchInkBlack,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = "পিডিএফ-এর নাম পরিবর্তন করুন:",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = SketchInkBlack
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = editableName,
+                        onValueChange = { editableName = it },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("rename_pdf_input"),
+                        singleLine = true,
+                        shape = RoundedCornerShape(10.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = Color.White,
+                            unfocusedContainerColor = Color.White,
+                            focusedBorderColor = SketchInkBlack,
+                            unfocusedBorderColor = SketchInkBlack.copy(alpha = 0.6f),
+                            focusedTextColor = SketchInkBlack,
+                            unfocusedTextColor = SketchInkBlack
+                        )
+                    )
+
+                    Button(
+                        onClick = { onRenamePdf(editableName) },
+                        enabled = editableName.isNotBlank() &&
+                                editableName.trim() != successState.fileName.removeSuffix(".pdf"),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .height(52.dp)
+                            .border(1.6.dp, SketchInkBlack, RoundedCornerShape(10.dp))
+                            .testTag("save_rename_button"),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = SketchMarkerYellow,
+                            contentColor = SketchInkBlack,
+                            disabledContainerColor = SketchCreamWash,
+                            disabledContentColor = SketchGraphite
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Check,
+                            contentDescription = "Save Name",
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "সেভ",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    }
+                }
+            }
+
+            // 4. Post-Creation PDF Size Reducer / Compressor (সাইজ কমানোর অপশন)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(SketchPenBlueWash.copy(alpha = 0.35f))
+                    .border(1.4.dp, SketchInkBlack, RoundedCornerShape(12.dp))
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Compress,
+                        contentDescription = "Compress PDF Size",
+                        tint = SketchInkBlack,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Column {
+                        Text(
+                            text = "পিডিএফ সাইজ কমান (Reduce File Size)",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = SketchInkBlack
+                        )
+                        Text(
+                            text = "পিডিএফ সাইজ বড় হলে এক ট্যাপে সাইজ কমিয়ে নিন:",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = SketchGraphite
+                        )
+                    }
+                }
+
+                if (isCompressing) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        CircularProgressIndicator(
+                            color = SketchInkBlack,
+                            strokeWidth = 2.5.dp,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Text(
+                            text = compressionStatus ?: "পিডিএফ সাইজ কমানো হচ্ছে...",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = SketchInkBlack
+                        )
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        PdfCompressionLevel.entries.forEach { level ->
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(Color.White)
+                                    .border(1.5.dp, SketchInkBlack, RoundedCornerShape(10.dp))
+                                    .clickable { onCompressPdf(level) }
+                                    .padding(vertical = 8.dp, horizontal = 4.dp)
+                                    .testTag("compress_${level.name.lowercase()}_button"),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    Text(
+                                        text = level.title,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = SketchInkBlack,
+                                        textAlign = TextAlign.Center
+                                    )
+                                    Text(
+                                        text = level.subtitle,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        color = SketchForestInk,
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (!isCompressing && !compressionStatus.isNullOrBlank()) {
+                    Text(
+                        text = compressionStatus,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = SketchForestInk
+                    )
+                }
+            }
+
+            // 5. Primary Action: Open in Files / Downloads App (ফাইলস-এ ওপেন করুন)
+            Button(
+                onClick = onOpenInFiles,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+                    .border(2.dp, SketchInkBlack, RoundedCornerShape(12.dp))
+                    .testTag("open_in_files_button"),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = SketchInkBlack,
+                    contentColor = Color.White
+                )
+            ) {
+                Icon(
+                    imageVector = Icons.Default.FolderOpen,
+                    contentDescription = "Open in Files",
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Open in Files (ফাইলস-এ দেখুন)",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.ExtraBold
+                )
+            }
+
+            // 6. Secondary Row: Open PDF Directly & Share
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 OutlinedButton(
-                    onClick = onSharePdf,
-                    shape = RoundedCornerShape(12.dp),
+                    onClick = onOpenPdf,
+                    shape = RoundedCornerShape(10.dp),
                     modifier = Modifier
                         .weight(1f)
-                        .height(46.dp)
+                        .height(48.dp)
+                        .background(SketchMarkerYellow, RoundedCornerShape(10.dp))
+                        .border(1.8.dp, SketchInkBlack, RoundedCornerShape(10.dp))
+                        .testTag("open_pdf_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.OpenInNew,
+                        contentDescription = "Open PDF",
+                        tint = SketchInkBlack,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "পিডিএফ পড়ুন",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = SketchInkBlack
+                    )
+                }
+
+                OutlinedButton(
+                    onClick = onSharePdf,
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp)
+                        .background(Color.White, RoundedCornerShape(10.dp))
+                        .border(1.8.dp, SketchInkBlack, RoundedCornerShape(10.dp))
                         .testTag("share_pdf_button")
                 ) {
                     Icon(
                         imageVector = Icons.Default.Share,
                         contentDescription = "Share PDF",
+                        tint = SketchInkBlack,
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "Share",
-                        style = MaterialTheme.typography.labelLarge
-                    )
-                }
-
-                FilledTonalButton(
-                    onClick = onOpenPdf,
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(46.dp)
-                        .testTag("open_pdf_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.OpenInNew,
-                        contentDescription = "Open Externally",
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "External App",
+                        text = "শেয়ার করুন",
                         style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.SemiBold
+                        fontWeight = FontWeight.ExtraBold,
+                        color = SketchInkBlack
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun SketchBadge(
+    text: String,
+    backgroundColor: Color
+) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(backgroundColor)
+            .border(1.4.dp, SketchInkBlack, RoundedCornerShape(8.dp))
+            .padding(horizontal = 10.dp, vertical = 5.dp)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Description,
+                contentDescription = null,
+                tint = SketchInkBlack,
+                modifier = Modifier.size(13.dp)
+            )
+            Text(
+                text = text,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.ExtraBold,
+                color = SketchInkBlack
+            )
         }
     }
 }

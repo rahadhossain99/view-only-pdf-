@@ -2,50 +2,42 @@ package com.example.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// Clean & Minimal Material 3 Productivity Palette — Light
-val PrimaryLight = Color(0xFF1D4ED8)
+// White Sketch Drawing Theme Palette (হোয়াইট স্কেচ ড্রয়িং থিম)
+val SketchPaperBg = Color(0xFFFAF8F4)       // Warm White Sketchbook Paper
+val SketchCardSurface = Color(0xFFFFFFFF)   // Pure Crisp White Drawing Card
+val SketchCreamWash = Color(0xFFF3EFE6)     // Soft Cream Wash for Inputs & Pills
+val SketchInkBlack = Color(0xFF18181B)      // Solid Charcoal Drawing Ink
+val SketchGraphite = Color(0xFF52525B)      // Pencil Graphite Subtitle Text
+val SketchLightRule = Color(0xFFE4E0D5)     // Faint Sketchbook Grid / Rule Line
+
+val SketchMarkerYellow = Color(0xFFFEF08A)  // Highlighter Marker Yellow Accent
+val SketchPenBlue = Color(0xFF1D4ED8)       // Fountain Pen Royal Blue
+val SketchPenBlueWash = Color(0xFFDBEAFE)   // Light Watercolor Blue Wash
+val SketchMintWash = Color(0xFFDCFCE7)      // Soft Sketch Mint Wash
+val SketchForestInk = Color(0xFF15803D)     // Forest Green Marker Ink
+val SketchCoralWash = Color(0xFFFEE2E2)     // Soft Coral Wash for Errors/Cancel
+val SketchCrimsonInk = Color(0xFFB91C1C)    // Crimson Ink
+
+// Material 3 mapping (Forced Light White Sketch Theme for authentic paper look)
+val PrimaryLight = SketchInkBlack
 val OnPrimaryLight = Color(0xFFFFFFFF)
-val PrimaryContainerLight = Color(0xFFDBEAFE)
-val OnPrimaryContainerLight = Color(0xFF1E3A8A)
+val PrimaryContainerLight = SketchMarkerYellow
+val OnPrimaryContainerLight = SketchInkBlack
 
-val SecondaryLight = Color(0xFF059669)
+val SecondaryLight = SketchPenBlue
 val OnSecondaryLight = Color(0xFFFFFFFF)
-val SecondaryContainerLight = Color(0xFFD1FAE5)
-val OnSecondaryContainerLight = Color(0xFF064E3B)
+val SecondaryContainerLight = SketchPenBlueWash
+val OnSecondaryContainerLight = SketchInkBlack
 
-val TertiaryLight = Color(0xFFD97706)
+val TertiaryLight = SketchForestInk
 val OnTertiaryLight = Color(0xFFFFFFFF)
-val TertiaryContainerLight = Color(0xFFFEF3C7)
-val OnTertiaryContainerLight = Color(0xFF78350F)
+val TertiaryContainerLight = SketchMintWash
+val OnTertiaryContainerLight = SketchInkBlack
 
-val BackgroundLight = Color(0xFFF8FAFC)
-val OnBackgroundLight = Color(0xFF0F172A)
-val SurfaceLight = Color(0xFFFFFFFF)
-val OnSurfaceLight = Color(0xFF0F172A)
-val SurfaceVariantLight = Color(0xFFF1F5F9)
-val OnSurfaceVariantLight = Color(0xFF475569)
-val OutlineLight = Color(0xFFCBD5E1)
-
-// Clean & Minimal Material 3 Productivity Palette — Dark
-val PrimaryDark = Color(0xFF60A5FA)
-val OnPrimaryDark = Color(0xFF1E3A8A)
-val PrimaryContainerDark = Color(0xFF1E40AF)
-val OnPrimaryContainerDark = Color(0xFFDBEAFE)
-
-val SecondaryDark = Color(0xFF34D399)
-val OnSecondaryDark = Color(0xFF064E3B)
-val SecondaryContainerDark = Color(0xFF065F46)
-val OnSecondaryContainerDark = Color(0xFFD1FAE5)
-
-val TertiaryDark = Color(0xFFFBBF24)
-val OnTertiaryDark = Color(0xFF78350F)
-val TertiaryContainerDark = Color(0xFF92400E)
-val OnTertiaryContainerDark = Color(0xFFFEF3C7)
-
-val BackgroundDark = Color(0xFF0F172A)
-val OnBackgroundDark = Color(0xFFF8FAFC)
-val SurfaceDark = Color(0xFF1E293B)
-val OnSurfaceDark = Color(0xFFF8FAFC)
-val SurfaceVariantDark = Color(0xFF334155)
-val OnSurfaceVariantDark = Color(0xFFCBD5E1)
-val OutlineDark = Color(0xFF64748B)
+val BackgroundLight = SketchPaperBg
+val OnBackgroundLight = SketchInkBlack
+val SurfaceLight = SketchCardSurface
+val OnSurfaceLight = SketchInkBlack
+val SurfaceVariantLight = SketchCreamWash
+val OnSurfaceVariantLight = SketchGraphite
+val OutlineLight = SketchInkBlack

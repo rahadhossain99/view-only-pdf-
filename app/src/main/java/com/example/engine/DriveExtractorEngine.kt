@@ -23,6 +23,7 @@ import com.example.data.model.ExtractionEngineMode
 import com.example.data.model.ResolutionQuality
 import com.example.data.storage.HistoryRepository
 import com.example.data.storage.PdfStorageHelper
+import com.example.service.DownloadNotificationHelper
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -91,6 +92,7 @@ class DriveExtractorEngine(
         .followSslRedirects(true)
         .build()
 
+    var customTitleProvider: (() -> String?)? = null
     var onStatusUpdate: ((message: String) -> Unit)? = null
     var onTelemetryUpdate: ((telemetry: EngineTelemetry) -> Unit)? = null
     var onTitleExtracted: ((title: String) -> Unit)? = null
@@ -1026,11 +1028,24 @@ class DriveExtractorEngine(
                         totalDetectedPages = effectiveTotal
                     }
 
-                    val statusMsg = "Captured Page $pageDisplay of $effectiveTotal (${currentEngineMode.shortBadge})..."
+                    val statusMsg = "Page $pageDisplay of $effectiveTotal extracted..."
                     onStatusUpdate?.invoke(statusMsg)
                     onPageCaptured?.invoke(pageDisplay, effectiveTotal, statusMsg)
+
+                    val activeDocName = customTitleProvider?.invoke()?.takeIf { it.isNotBlank() }
+                        ?: extractedTitle
+                        ?: "Protected PDF"
+                    val livePercent = ((pageDisplay.toFloat() / effectiveTotal.coerceAtLeast(1).toFloat()) * 82f)
+                        .toInt().coerceIn(5, 82)
+                    DownloadNotificationHelper.showProgress(
+                        context = context,
+                        docName = activeDocName,
+                        percent = livePercent,
+                        detailText = "Extracting Page $pageDisplay of $effectiveTotal"
+                    )
+
                     emitTelemetry(
-                        "Multi-Page Capture Active",
+                        "Fast Page Extractor",
                         "Captured full page $pageDisplay of $effectiveTotal"
                     )
 
@@ -1051,7 +1066,6 @@ class DriveExtractorEngine(
                         val sHeight = inspection?.scrollHeight ?: 0
                         val cHeight = (inspection?.clientHeight ?: 1).coerceAtLeast(1)
                         if (sHeight <= (cHeight * 1.25).toInt()) {
-                            // Genuinely a single-page document
                             Log.d(TAG, "Single page document confirmed by scrollHeight ($sHeight <= 1.25 * $cHeight).")
                             break
                         }
@@ -1090,7 +1104,8 @@ class DriveExtractorEngine(
                 val pagesList = capturedPagesMap.values.toList()
                 onExtractionCompleted?.invoke(pagesList, extractedTitle, pagesList.firstOrNull())
             } else {
-                onError?.invoke("Could not capture document pages. Try Interactive Browser if Google sign-in is required.")
+                DownloadNotificationHelper.cancelProgress(context)
+                onError?.invoke("Could not capture document pages. Try Sign-In Preview if Google login is required.")
             }
         }
     }
@@ -1124,7 +1139,7 @@ class DriveExtractorEngine(
                             val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                             if (bmp != null && bmp.width > 120 && bmp.height > 120) {
                                 FileOutputStream(outFile).use { out ->
-                                    bmp.compress(Bitmap.CompressFormat.JPEG, 94, out)
+                                    bmp.compress(Bitmap.CompressFormat.JPEG, currentResolution.jpegQuality, out)
                                     out.flush()
                                 }
                                 bmp.recycle()
@@ -1163,7 +1178,7 @@ class DriveExtractorEngine(
             while (isExtracting && misses < 2 && currentIdx < 300) {
                 val pageNumDisplay = probeFiles.size + 1
                 withContext(Dispatchers.Main) {
-                    val msg = "Probing high-res Page $pageNumDisplay..."
+                    val msg = "Downloading Page $pageNumDisplay..."
                     onStatusUpdate?.invoke(msg)
                     onPageCaptured?.invoke(pageNumDisplay, maxOf(totalDetectedPages, pageNumDisplay), msg)
                 }
@@ -1179,7 +1194,7 @@ class DriveExtractorEngine(
                     misses++
                 }
                 currentIdx++
-                delay(140)
+                delay(90)
             }
 
             if (probeFiles.size > capturedPageFiles.size) {
@@ -1266,7 +1281,7 @@ class DriveExtractorEngine(
                     val bytes = Base64.decode(base64Str, Base64.DEFAULT)
                     val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return@withContext false
                     FileOutputStream(outFile).use { out ->
-                        bmp.compress(Bitmap.CompressFormat.JPEG, 94, out)
+                        bmp.compress(Bitmap.CompressFormat.JPEG, currentResolution.jpegQuality, out)
                         out.flush()
                     }
                     bmp.recycle()
@@ -1327,8 +1342,8 @@ class DriveExtractorEngine(
                 if (lastJson.optBoolean("ready", false)) {
                     return@withContext lastJson
                 }
-                delay(240)
-                elapsed += 240
+                delay(150)
+                elapsed += 150
             }
             lastJson
         }
@@ -1364,7 +1379,7 @@ class DriveExtractorEngine(
             }
 
             FileOutputStream(outputFile).use { out ->
-                cropBitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
+                cropBitmap.compress(Bitmap.CompressFormat.JPEG, currentResolution.jpegQuality, out)
                 out.flush()
             }
 
@@ -1382,33 +1397,53 @@ class DriveExtractorEngine(
     private fun compileCapturedFilesToPdf(files: List<File>) {
         scope.launch(Dispatchers.IO) {
             try {
+                val resolvedTitle = customTitleProvider?.invoke()?.takeIf { it.isNotBlank() }
+                    ?: extractedTitle
+                    ?: "SketchPDF_${System.currentTimeMillis()}"
+
                 withContext(Dispatchers.Main) {
-                    val msg = "Compiling ${files.size} pages into native A4 PDF..."
+                    val msg = "Building compact PDF (${files.size} pages)..."
                     onStatusUpdate?.invoke(msg)
                     emitTelemetry("PDF Compiler", msg)
                     onCompilingPdf?.invoke(1, files.size, 0.1f, msg)
+                    DownloadNotificationHelper.showProgress(
+                        context = context,
+                        docName = resolvedTitle,
+                        percent = 85,
+                        detailText = msg
+                    )
                 }
 
                 val pdfCompiler = PdfCompiler()
                 val pdfBytes = pdfCompiler.compileImageFiles(
                     files = files,
-                    enhanceContrast = enhanceContrast
+                    enhanceContrast = enhanceContrast,
+                    maxWidthPx = currentResolution.width,
+                    jpegQuality = currentResolution.jpegQuality
                 ) { current, total ->
                     val fraction = current.toFloat() / total.coerceAtLeast(1)
+                    val overallPercent = 85 + (fraction * 14f).toInt()
                     scope.launch(Dispatchers.Main) {
-                        onCompilingPdf?.invoke(current, total, fraction, "Writing page $current of $total to PDF...")
+                        onCompilingPdf?.invoke(current, total, fraction, "Packing page $current of $total into PDF...")
+                        DownloadNotificationHelper.showProgress(
+                            context = context,
+                            docName = resolvedTitle,
+                            percent = overallPercent,
+                            detailText = "Packing page $current of $total..."
+                        )
                     }
                 }
 
-                val title = extractedTitle ?: "Drive_Document_${System.currentTimeMillis()}"
-                val safeFileName = PdfStorageHelper.generateFileName(title)
+                val finalTitle = customTitleProvider?.invoke()?.takeIf { it.isNotBlank() } ?: resolvedTitle
+                val safeFileName = PdfStorageHelper.generateFileName(finalTitle)
 
                 val savedUri = PdfStorageHelper.savePdfToDownloads(context, pdfBytes, safeFileName).getOrNull()
                 val cacheFile = PdfStorageHelper.saveToAppCache(context, pdfBytes, safeFileName)
+                val finalUri = savedUri ?: Uri.fromFile(cacheFile)
 
                 val historyItem = DownloadHistoryItem(
-                    title = title,
-                    uriString = (savedUri ?: Uri.fromFile(cacheFile)).toString(),
+                    title = finalTitle,
+                    uriString = finalUri.toString(),
                     pageCount = files.size,
                     fileSizeBytes = pdfBytes.size.toLong(),
                     localPath = cacheFile.absolutePath,
@@ -1419,11 +1454,19 @@ class DriveExtractorEngine(
                 files.forEach { it.delete() }
 
                 withContext(Dispatchers.Main) {
-                    val doneMsg = "PDF Successfully Created (${files.size} pages)!"
+                    val doneMsg = "100% Complete (${files.size} pages)!"
                     onStatusUpdate?.invoke(doneMsg)
                     emitTelemetry("Completed", doneMsg)
+                    DownloadNotificationHelper.showCompleted(
+                        context = context,
+                        fileName = safeFileName,
+                        pageCount = files.size,
+                        fileSizeBytes = pdfBytes.size.toLong(),
+                        uri = finalUri,
+                        cacheFile = cacheFile
+                    )
                     onPdfReady?.invoke(
-                        savedUri ?: Uri.fromFile(cacheFile),
+                        finalUri,
                         safeFileName,
                         files.size,
                         pdfBytes.size.toLong(),
@@ -1434,6 +1477,7 @@ class DriveExtractorEngine(
             } catch (e: Exception) {
                 Log.e(TAG, "PDF compilation failed", e)
                 withContext(Dispatchers.Main) {
+                    DownloadNotificationHelper.cancelProgress(context)
                     onError?.invoke("Failed to compile PDF: ${e.localizedMessage}")
                     destroy()
                 }
@@ -1518,15 +1562,17 @@ class DriveExtractorEngine(
                         captureJob?.cancel()
                         interceptedStreamCount.incrementAndGet()
 
-                        val title = extractedTitle ?: "Protected_PDF_${System.currentTimeMillis()}"
+                        val customTitle = customTitleProvider?.invoke()?.takeIf { it.isNotBlank() }
+                        val title = customTitle ?: extractedTitle ?: "Protected_PDF_${System.currentTimeMillis()}"
                         val safeFileName = PdfStorageHelper.generateFileName(title)
                         val savedUri = PdfStorageHelper.savePdfToDownloads(context, pdfBytes, safeFileName).getOrNull()
                         val cacheFile = PdfStorageHelper.saveToAppCache(context, pdfBytes, safeFileName)
                         val detectedPageCount = PdfOrganizerEngine(context).getPageCount(cacheFile).coerceAtLeast(1)
+                        val finalUri = savedUri ?: Uri.fromFile(cacheFile)
 
                         val historyItem = DownloadHistoryItem(
                             title = title,
-                            uriString = (savedUri ?: Uri.fromFile(cacheFile)).toString(),
+                            uriString = finalUri.toString(),
                             pageCount = detectedPageCount,
                             fileSizeBytes = pdfBytes.size.toLong(),
                             localPath = cacheFile.absolutePath,
@@ -1534,10 +1580,19 @@ class DriveExtractorEngine(
                         )
                         HistoryRepository(context).addHistoryItem(historyItem)
 
+                        DownloadNotificationHelper.showCompleted(
+                            context = context,
+                            fileName = safeFileName,
+                            pageCount = detectedPageCount,
+                            fileSizeBytes = pdfBytes.size.toLong(),
+                            uri = finalUri,
+                            cacheFile = cacheFile
+                        )
+
                         withContext(Dispatchers.Main) {
                             emitTelemetry("Tier 1: Direct Blob Stream", "Captured native PDF binary directly from memory!")
                             onPdfReady?.invoke(
-                                savedUri ?: Uri.fromFile(cacheFile),
+                                finalUri,
                                 safeFileName,
                                 detectedPageCount,
                                 pdfBytes.size.toLong(),

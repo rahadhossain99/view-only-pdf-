@@ -1,79 +1,100 @@
 package com.example.ui.components
 
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Done
+import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.FastForward
-import androidx.compose.material.icons.filled.PictureAsPdf
-import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material.icons.outlined.CloudDownload
-import androidx.compose.material.icons.outlined.FindInPage
-import androidx.compose.material.icons.outlined.Speed
+import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Surface
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.data.model.DownloadState
 import com.example.data.model.EngineTelemetry
+import com.example.ui.theme.SketchCard
+import com.example.ui.theme.SketchCoralWash
+import com.example.ui.theme.SketchCreamWash
+import com.example.ui.theme.SketchCrimsonInk
+import com.example.ui.theme.SketchGraphite
+import com.example.ui.theme.SketchInkBlack
+import com.example.ui.theme.SketchMarkerYellow
 
 @Composable
 fun ProgressCard(
     state: DownloadState,
     documentTitle: String?,
+    customFileName: String = "",
+    onCustomFileNameChange: (String) -> Unit = {},
     telemetry: EngineTelemetry = EngineTelemetry(),
     onCancel: () -> Unit,
     onForceCompile: () -> Unit,
     onOpenInteractive: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    Card(
+    val progressVal = getProgressFraction(state)
+    val animatedProgress by animateFloatAsState(targetValue = progressVal, label = "SketchProgress")
+    val percentInt = (progressVal * 100f).toInt().coerceIn(1, 99)
+
+    val capturedPages = maxOf(
+        telemetry.precisionScreenshotsCaptured,
+        if (state is DownloadState.DownloadingImages) state.current else 0,
+        if (state is DownloadState.InterceptingPages) state.capturedCount else 0
+    )
+    val totalPages = maxOf(
+        telemetry.totalDetectedPages,
+        if (state is DownloadState.DownloadingImages) state.total else 0,
+        capturedPages
+    )
+
+    SketchCard(
         modifier = modifier
             .fillMaxWidth()
             .testTag("download_progress_card"),
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        containerColor = Color.White,
+        borderColor = SketchInkBlack,
+        shadowColor = SketchInkBlack,
+        cornerRadius = 16.dp,
+        shadowOffset = 4.dp
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // Header with Active Engine Pill and Cancel button
+            // 1. Top Row: Title + Large Sketch Percentage Badge
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -82,367 +103,233 @@ fun ProgressCard(
                 Column(modifier = Modifier.weight(1f)) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Surface(
-                            shape = RoundedCornerShape(6.dp),
-                            color = MaterialTheme.colorScheme.primaryContainer
-                        ) {
-                            Text(
-                                text = telemetry.activeTierName,
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                            )
-                        }
+                        Icon(
+                            imageVector = Icons.Default.NotificationsActive,
+                            contentDescription = "Notification Active",
+                            tint = SketchInkBlack,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = "নোটিফিকেশনে লাইভ প্রগ্রেস চলছে",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = SketchGraphite
+                        )
                     }
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = documentTitle ?: "Extracting Protected Document...",
+                        text = customFileName.ifBlank { documentTitle ?: "পিডিএফ তৈরি হচ্ছে..." },
                         style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = SketchInkBlack,
                         maxLines = 1
                     )
                     Text(
-                        text = getStatusSubtitle(state),
+                        text = getDetailedStatusText(state, capturedPages, totalPages),
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = SketchGraphite,
+                        maxLines = 2
                     )
                 }
 
-                IconButton(
-                    onClick = onCancel,
+                Spacer(modifier = Modifier.width(10.dp))
+
+                // Big Sketch Percentage Stamp
+                Box(
                     modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f))
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(SketchMarkerYellow)
+                        .border(2.dp, SketchInkBlack, RoundedCornerShape(12.dp))
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "$percentInt%",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = SketchInkBlack
+                    )
+                }
+            }
+
+            // 2. Hand-Drawn Sketch Hatched Progress Bar
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(22.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(SketchCreamWash)
+                    .border(1.8.dp, SketchInkBlack, RoundedCornerShape(8.dp))
+                    .testTag("linear_progress_bar")
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(animatedProgress.coerceIn(0.04f, 1f))
+                        .background(SketchMarkerYellow)
+                ) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val step = 10.dp.toPx()
+                        var x = -size.height
+                        while (x < size.width + size.height) {
+                            drawLine(
+                                color = SketchInkBlack.copy(alpha = 0.22f),
+                                start = Offset(x, size.height),
+                                end = Offset(x + size.height, 0f),
+                                strokeWidth = 2.dp.toPx()
+                            )
+                            x += step
+                        }
+                    }
+                }
+            }
+
+            // 3. Live Editable PDF File Name while downloading!
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.DriveFileRenameOutline,
+                        contentDescription = null,
+                        tint = SketchInkBlack,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Text(
+                        text = "ডাউনলোড চলাকালীন পিডিএফ-এর নাম পরিবর্তন করুন:",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = SketchInkBlack
+                    )
+                }
+
+                OutlinedTextField(
+                    value = customFileName,
+                    onValueChange = onCustomFileNameChange,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("progress_pdf_name_input"),
+                    placeholder = {
+                        Text(
+                            text = documentTitle ?: "নতুন পিডিএফ-এর নাম লিখুন...",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = SketchGraphite.copy(alpha = 0.65f)
+                        )
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(10.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedContainerColor = SketchCreamWash.copy(alpha = 0.4f),
+                        unfocusedContainerColor = SketchCreamWash.copy(alpha = 0.25f),
+                        focusedBorderColor = SketchInkBlack,
+                        unfocusedBorderColor = SketchInkBlack.copy(alpha = 0.55f),
+                        focusedTextColor = SketchInkBlack,
+                        unfocusedTextColor = SketchInkBlack
+                    )
+                )
+            }
+
+            // 4. Action Buttons: Instant Save (if pages captured) & Cancel
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                if (capturedPages > 0 && state !is DownloadState.CompilingPdf) {
+                    Button(
+                        onClick = onForceCompile,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .weight(1.3f)
+                            .height(48.dp)
+                            .border(1.8.dp, SketchInkBlack, RoundedCornerShape(10.dp))
+                            .testTag("force_compile_button"),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = SketchInkBlack,
+                            contentColor = Color.White
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.FastForward,
+                            contentDescription = "Save Captured Pages Now",
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "এখনই সেভ করুন ($capturedPages পেজ)",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                OutlinedButton(
+                    onClick = onCancel,
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp)
+                        .background(SketchCoralWash, RoundedCornerShape(10.dp))
+                        .border(1.8.dp, SketchInkBlack, RoundedCornerShape(10.dp))
                         .testTag("cancel_download_button")
                 ) {
                     Icon(
                         imageVector = Icons.Default.Close,
                         contentDescription = "Cancel Download",
-                        tint = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.size(18.dp)
+                        tint = SketchCrimsonInk,
+                        modifier = Modifier.size(16.dp)
                     )
-                }
-            }
-
-            // Pipeline Stage Badges
-            PipelineStagesRow(state = state)
-
-            // Live 4-Tier Engine Telemetry Strip
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f))
-                    .padding(10.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                TelemetryMetricItem(
-                    label = "Streams",
-                    value = "${telemetry.interceptedStreams}"
-                )
-                TelemetryMetricItem(
-                    label = "Canvas",
-                    value = "${telemetry.canvasHooksCaptured}"
-                )
-                TelemetryMetricItem(
-                    label = "DOM Tiles",
-                    value = "${telemetry.domTilesDiscovered}"
-                )
-                TelemetryMetricItem(
-                    label = "Captured",
-                    value = "${telemetry.precisionScreenshotsCaptured}/${telemetry.totalDetectedPages.coerceAtLeast(1)}"
-                )
-            }
-
-            // Progress Bar
-            val progressVal = getProgressFraction(state)
-            val animatedProgress by animateFloatAsState(targetValue = progressVal, label = "ProgressAnim")
-
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                if (progressVal > 0f) {
-                    LinearProgressIndicator(
-                        progress = { animatedProgress },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(8.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .testTag("linear_progress_bar"),
-                        color = MaterialTheme.colorScheme.primary,
-                        trackColor = MaterialTheme.colorScheme.surfaceVariant
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "বাতিল করুন",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = SketchCrimsonInk
                     )
-                } else {
-                    LinearProgressIndicator(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(8.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .testTag("linear_progress_bar"),
-                        color = MaterialTheme.colorScheme.primary,
-                        trackColor = MaterialTheme.colorScheme.surfaceVariant
-                    )
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.Speed,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Text(
-                            text = getDetailedStatusText(state),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1
-                        )
-                    }
-                    if (progressVal > 0f) {
-                        Text(
-                            text = "${(progressVal * 100).toInt()}%",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                }
-            }
-
-            // Actions row: Live Viewer & Instant Compile
-            val capturedSoFar = maxOf(
-                telemetry.precisionScreenshotsCaptured,
-                telemetry.canvasHooksCaptured,
-                telemetry.domTilesDiscovered,
-                if (state is DownloadState.InterceptingPages) state.capturedCount else 0,
-                if (state is DownloadState.DownloadingImages) state.current else 0
-            )
-            val showViewer = onOpenInteractive != null
-            val showCompile = capturedSoFar > 0 && state !is DownloadState.CompilingPdf
-
-            if (showViewer || showCompile) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    if (showViewer) {
-                        OutlinedButton(
-                            onClick = onOpenInteractive!!,
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(48.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Visibility,
-                                contentDescription = "Open Live Viewer",
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "Live Browser",
-                                style = MaterialTheme.typography.labelMedium
-                            )
-                        }
-                    }
-
-                    if (showCompile) {
-                        Button(
-                            onClick = onForceCompile,
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier
-                                .weight(1.3f)
-                                .height(48.dp)
-                                .testTag("force_compile_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.FastForward,
-                                contentDescription = "Compile Captured Pages Now",
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "Build PDF ($capturedSoFar Pages)",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
                 }
             }
         }
     }
 }
 
-@Composable
-private fun TelemetryMetricItem(
-    label: String,
-    value: String
-) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-            text = value,
-            style = MaterialTheme.typography.labelMedium,
-            fontFamily = FontFamily.Monospace,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSurface
-        )
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    }
-}
-
-@Composable
-private fun PipelineStagesRow(state: DownloadState) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceEvenly,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        val stageIndex = when (state) {
-            is DownloadState.LoadingWebView -> 1
-            is DownloadState.InterceptingPages -> 1
-            is DownloadState.DownloadingImages -> 2
-            is DownloadState.CompilingPdf -> 3
-            is DownloadState.Success -> 4
-            else -> 0
-        }
-
-        StageItem(
-            title = "1. Hook & Scan",
-            icon = Icons.Outlined.FindInPage,
-            isCurrent = stageIndex == 1,
-            isDone = stageIndex > 1
-        )
-        StageItem(
-            title = "2. Page Capture",
-            icon = Icons.Outlined.CloudDownload,
-            isCurrent = stageIndex == 2,
-            isDone = stageIndex > 2
-        )
-        StageItem(
-            title = "3. Build A4 PDF",
-            icon = Icons.Default.PictureAsPdf,
-            isCurrent = stageIndex == 3,
-            isDone = stageIndex > 3
-        )
-    }
-}
-
-@Composable
-private fun StageItem(
-    title: String,
-    icon: ImageVector,
-    isCurrent: Boolean,
-    isDone: Boolean
-) {
-    val containerColor = when {
-        isDone -> MaterialTheme.colorScheme.secondaryContainer
-        isCurrent -> MaterialTheme.colorScheme.primary
-        else -> MaterialTheme.colorScheme.surfaceVariant
-    }
-
-    val contentColor = when {
-        isDone -> MaterialTheme.colorScheme.onSecondaryContainer
-        isCurrent -> MaterialTheme.colorScheme.onPrimary
-        else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-    }
-
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        Box(
-            modifier = Modifier
-                .size(34.dp)
-                .clip(CircleShape)
-                .background(containerColor),
-            contentAlignment = Alignment.Center
-        ) {
-            if (isDone) {
-                Icon(
-                    imageVector = Icons.Default.Done,
-                    contentDescription = "Completed",
-                    tint = contentColor,
-                    modifier = Modifier.size(18.dp)
-                )
-            } else if (isCurrent) {
-                CircularProgressIndicator(
-                    color = contentColor,
-                    strokeWidth = 2.dp,
-                    modifier = Modifier.size(18.dp)
-                )
+private fun getDetailedStatusText(
+    state: DownloadState,
+    capturedPages: Int,
+    totalPages: Int
+): String {
+    return when (state) {
+        is DownloadState.LoadingWebView -> "ডকুমেন্ট লোড হচ্ছে এবং পেজ স্ক্যান করা হচ্ছে..."
+        is DownloadState.InterceptingPages -> "পেজ স্ক্যান চলছে ($capturedPages / ~$totalPages পেজ)..."
+        is DownloadState.DownloadingImages -> {
+            if (totalPages > 0) {
+                "পেজ ${state.current} / $totalPages স্ক্রিনশট নেওয়া হয়েছে..."
             } else {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = title,
-                    tint = contentColor,
-                    modifier = Modifier.size(18.dp)
-                )
+                state.message
             }
         }
-
-        Text(
-            text = title,
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
-            color = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    }
-}
-
-private fun getStatusSubtitle(state: DownloadState): String {
-    return when (state) {
-        is DownloadState.LoadingWebView -> "Probing streams, injecting Blob/Canvas hooks & loading document..."
-        is DownloadState.InterceptingPages -> "Intercepting high-DPI page tiles & DOM containers"
-        is DownloadState.DownloadingImages -> "Capturing full-resolution pages without splits or cutoffs"
-        is DownloadState.CompilingPdf -> "Rendering pages into a native A4 PDF document"
-        else -> "Working..."
-    }
-}
-
-private fun getDetailedStatusText(state: DownloadState): String {
-    return when (state) {
-        is DownloadState.LoadingWebView -> state.message
-        is DownloadState.InterceptingPages -> "${state.capturedCount} of ~${state.estimatedTotal} pages detected"
-        is DownloadState.DownloadingImages -> state.message
-        is DownloadState.CompilingPdf -> state.message
-        else -> ""
+        is DownloadState.CompilingPdf -> "সবগুলো পেজ যুক্ত করে পারফেক্ট পিডিএফ তৈরি হচ্ছে..."
+        else -> "কাজ চলছে..."
     }
 }
 
 private fun getProgressFraction(state: DownloadState): Float {
     return when (state) {
-        is DownloadState.LoadingWebView -> 0.06f
+        is DownloadState.LoadingWebView -> 0.05f
         is DownloadState.InterceptingPages -> {
             if (state.estimatedTotal > 0) {
-                (state.capturedCount.toFloat() / state.estimatedTotal.toFloat() * 0.35f).coerceIn(0.06f, 0.35f)
+                (state.capturedCount.toFloat() / state.estimatedTotal.toFloat() * 0.40f).coerceIn(0.06f, 0.40f)
             } else {
-                0.15f
+                0.12f
             }
         }
-        is DownloadState.DownloadingImages -> 0.20f + (state.percent * 0.55f)
-        is DownloadState.CompilingPdf -> 0.75f + (state.percent * 0.25f)
+        is DownloadState.DownloadingImages -> state.percent.coerceIn(0.06f, 0.90f)
+        is DownloadState.CompilingPdf -> state.percent.coerceIn(0.90f, 0.99f)
         is DownloadState.Success -> 1.0f
         else -> 0f
     }
