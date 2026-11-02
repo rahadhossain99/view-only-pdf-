@@ -163,15 +163,37 @@ fun AutoScreenshotStudioDialog(
         DriveExtractorEngine.sanitizeDriveUrl(url)
     }
 
-    // Function to take screenshot of current WebView content
-    fun takeCurrentScreenshot(pageNumber: Int? = null) {
+    // Function to take precision screenshot of current WebView page (cropped to exact page bounds when available)
+    fun takeCurrentScreenshot(
+        pageNumber: Int? = null,
+        foundElement: Boolean = false,
+        leftCss: Int = 0,
+        topCss: Int = 0,
+        widthCss: Int = 0,
+        heightCss: Int = 0
+    ) {
         val wv = webViewInstance ?: return
         if (wv.width <= 0 || wv.height <= 0) return
 
         try {
-            val fullBitmap = Bitmap.createBitmap(wv.width, wv.height, Bitmap.Config.ARGB_8888)
+            val w = wv.width
+            val h = wv.height
+            val fullBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(fullBitmap)
             wv.draw(canvas)
+
+            @Suppress("DEPRECATION")
+            val scale = wv.scale.takeIf { it > 0.1f } ?: context.resources.displayMetrics.density
+
+            val targetBitmap: Bitmap = if (foundElement && widthCss > 120 && heightCss > 120) {
+                val pxLeft = (leftCss * scale).toInt().coerceIn(0, (w - 100).coerceAtLeast(0))
+                val pxTop = (topCss * scale).toInt().coerceIn(0, (h - 100).coerceAtLeast(0))
+                val pxWidth = (widthCss * scale).toInt().coerceIn(100, (w - pxLeft).coerceAtLeast(100))
+                val pxHeight = (heightCss * scale).toInt().coerceIn(100, (h - pxTop).coerceAtLeast(100))
+                Bitmap.createBitmap(fullBitmap, pxLeft, pxTop, pxWidth, pxHeight)
+            } else {
+                fullBitmap
+            }
 
             // Cache bitmap to local disk file for 100% memory safety
             val screenshotDir = File(context.cacheDir, "screenshots_cache").apply {
@@ -181,16 +203,19 @@ fun AutoScreenshotStudioDialog(
             val imageFile = File(screenshotDir, "shot_${System.currentTimeMillis()}_$pageNum.jpg")
 
             FileOutputStream(imageFile).use { out ->
-                fullBitmap.compress(Bitmap.CompressFormat.JPEG, 94, out)
+                targetBitmap.compress(Bitmap.CompressFormat.JPEG, 94, out)
                 out.flush()
             }
 
             // Create small thumbnail for UI carousel
             val thumbWidth = 140
-            val thumbHeight = ((wv.height.toFloat() / wv.width.toFloat()) * thumbWidth).toInt().coerceAtLeast(100)
-            val thumbnail = Bitmap.createScaledBitmap(fullBitmap, thumbWidth, thumbHeight, true)
+            val thumbHeight = ((targetBitmap.height.toFloat() / targetBitmap.width.toFloat().coerceAtLeast(1f)) * thumbWidth)
+                .toInt().coerceAtLeast(100)
+            val thumbnail = Bitmap.createScaledBitmap(targetBitmap, thumbWidth, thumbHeight, true)
 
-            // Free full size bitmap immediately to keep memory ultra low
+            if (targetBitmap != fullBitmap) {
+                targetBitmap.recycle()
+            }
             fullBitmap.recycle()
 
             capturedScreenshots.add(
@@ -205,85 +230,163 @@ fun AutoScreenshotStudioDialog(
         }
     }
 
-    // Auto-Scroll Loop
+    // Precision Page-by-Page Auto-Scroll & Bounding-Box Capture Loop
     LaunchedEffect(isAutoCapturing) {
         if (!isAutoCapturing) return@LaunchedEffect
+        val wv = webViewInstance ?: return@LaunchedEffect
 
         // Clean toolbars before capturing
         if (cleanDocumentMode) {
-            webViewInstance?.evaluateJavascript(
+            wv.evaluateJavascript(
                 """
                 (function() {
-                    var toolbars = document.querySelectorAll('.drive-viewer-toolstrip, .drive-viewer-action-bar, .ndfHFb-c4YZDc-j7LFlb');
-                    toolbars.forEach(function(t) { t.style.display = 'none'; });
+                    var toolbars = document.querySelectorAll('.drive-viewer-toolstrip, .drive-viewer-action-bar, .ndfHFb-c4YZDc-j7LFlb, .ndfHFb-c4YZDc-to915-LgbsSe');
+                    toolbars.forEach(function(t) { t.style.opacity = '0'; t.style.pointerEvents = 'none'; });
                 })();
                 """.trimIndent(),
                 null
             )
         }
 
-        var consecutiveStagnant = 0
-        var lastScroll = -1
+        var pageIdx = capturedScreenshots.size
 
-        while (isActive && isAutoCapturing) {
-            // Take screenshot of currently visible page
-            takeCurrentScreenshot()
-
-            // Wait for rendering delay
-            delay(autoCaptureDelayMs.toLong())
-
-            // Scroll down one page step
-            val scrollScript = """
+        while (isActive && isAutoCapturing && pageIdx < 400) {
+            val scrollDeferred = kotlinx.coroutines.CompletableDeferred<org.json.JSONObject>()
+            val scrollJs = """
                 (function() {
-                    var selectors = ['.drive-viewer-paginated-scrollable', '.ndfHFb-c4YZDc-bN97Pc', '.ndfHFb-c4YZDc-Wrql6b', '.drive-viewer-content', '[role="main"]'];
-                    var el = null;
-                    for (var i = 0; i < selectors.length; i++) {
-                        var c = document.querySelector(selectors[i]);
-                        if (c && c.scrollHeight > c.clientHeight + 40) {
-                            el = c;
-                            break;
-                        }
-                    }
-                    if (!el) {
-                        var divs = document.querySelectorAll('div');
-                        for (var j = 0; j < divs.length; j++) {
-                            var d = divs[j];
-                            if (d.scrollHeight > d.clientHeight + 80) {
-                                var st = window.getComputedStyle(d);
-                                if (st.overflowY === 'auto' || st.overflowY === 'scroll') {
-                                    el = d;
-                                    break;
-                                }
+                    var sc = document.querySelector('.ndfHFb-c4YZDc-bN97Pc, .drive-viewer-paginated-scrollable, #viewerContainer');
+                    if (!sc) {
+                        var all = document.querySelectorAll('div');
+                        var maxH = 0;
+                        for (var i = 0; i < all.length; i++) {
+                            if (all[i].scrollHeight > all[i].clientHeight + 60 && all[i].scrollHeight > maxH) {
+                                maxH = all[i].scrollHeight;
+                                sc = all[i];
                             }
                         }
                     }
-                    if (!el) el = document.scrollingElement || document.documentElement || document.body;
+                    if (!sc) sc = document.scrollingElement || document.documentElement || document.body;
 
-                    var curScroll = el.scrollTop || window.pageYOffset || 0;
-                    var maxScroll = (el.scrollHeight || document.body.scrollHeight) - (el.clientHeight || window.innerHeight);
-                    var step = Math.max(500, (el.clientHeight || window.innerHeight || 800) * 0.90);
+                    // Find actual per-page elements (never .ndfHFb-c4YZDc-Wrql6b which is the outer wrapper)
+                    var pageList = document.querySelectorAll('.ndfHFb-c4YZDc-cYSp0e-DARUcf, .drive-viewer-paginated-page, [data-page-number], .pdfViewer .page');
+                    var idx = $pageIdx;
 
-                    if (el.scrollTop !== undefined && el.scrollHeight > el.clientHeight) {
-                        el.scrollTop += step;
+                    if (pageList && pageList.length > 0) {
+                        if (idx >= pageList.length) {
+                            return JSON.stringify({ done: true, domTotal: pageList.length });
+                        }
+                        var pageEl = pageList[idx];
+                        pageEl.scrollIntoView({ behavior: 'instant', block: 'start', inline: 'center' });
+                        if (sc) sc.dispatchEvent(new Event('scroll', { bubbles: true }));
+                        window.dispatchEvent(new Event('scroll'));
+
+                        var rect = pageEl.getBoundingClientRect();
+                        var img = pageEl.querySelector ? pageEl.querySelector('img') : null;
+                        var ready = img ? (img.complete && img.naturalWidth > 120) : true;
+                        return JSON.stringify({
+                            done: false,
+                            found: true,
+                            ready: ready,
+                            left: Math.round(rect.left),
+                            top: Math.round(rect.top),
+                            width: Math.round(rect.width),
+                            height: Math.round(rect.height),
+                            domTotal: pageList.length
+                        });
                     }
-                    window.scrollBy(0, step);
 
-                    return {
-                        cur: curScroll,
-                        max: maxScroll,
-                        atBottom: (maxScroll > 0 && curScroll >= maxScroll - 60)
-                    };
+                    // Fallback continuous scroll if no discrete page elements
+                    var cur = sc.scrollTop || 0;
+                    var ch = sc.clientHeight || window.innerHeight || 800;
+                    var sh = sc.scrollHeight || document.body.scrollHeight || 800;
+                    if (idx > 0) {
+                        sc.scrollTop = cur + Math.round(ch * 0.88);
+                    }
+                    var newScroll = sc.scrollTop || 0;
+                    var reachedEnd = (idx > 0) && (newScroll + ch >= sh - 30) && (Math.abs(newScroll - cur) < 10);
+                    return JSON.stringify({
+                        done: reachedEnd,
+                        found: false,
+                        ready: true,
+                        left: 0,
+                        top: 0,
+                        width: 0,
+                        height: 0,
+                        domTotal: 0
+                    });
                 })();
             """.trimIndent()
 
-            webViewInstance?.evaluateJavascript(scrollScript) { resJson ->
-                // Check if stuck or reached end
-                if (resJson != null && resJson.contains("\"atBottom\":true")) {
-                    isAutoCapturing = false
+            wv.evaluateJavascript(scrollJs) { raw ->
+                try {
+                    val unescaped = raw?.replace("\\\"", "\"")?.trim('"', ' ') ?: "{}"
+                    scrollDeferred.complete(org.json.JSONObject(unescaped))
+                } catch (e: Exception) {
+                    scrollDeferred.complete(org.json.JSONObject())
                 }
             }
 
-            delay(350)
+            val info = scrollDeferred.await()
+            val domTotal = info.optInt("domTotal", 0)
+            if (domTotal > detectedTotalPages) {
+                detectedTotalPages = domTotal
+            }
+
+            if (info.optBoolean("done", false)) {
+                isAutoCapturing = false
+                break
+            }
+
+            // Wait for page image to render completely
+            delay(autoCaptureDelayMs.toLong())
+
+            // Re-read bounding box right before screenshot in case layout settled
+            val boxDeferred = kotlinx.coroutines.CompletableDeferred<org.json.JSONObject>()
+            wv.evaluateJavascript(
+                """
+                (function() {
+                    var pageList = document.querySelectorAll('.ndfHFb-c4YZDc-cYSp0e-DARUcf, .drive-viewer-paginated-page, [data-page-number], .pdfViewer .page');
+                    var idx = $pageIdx;
+                    if (pageList && idx < pageList.length) {
+                        var r = pageList[idx].getBoundingClientRect();
+                        return JSON.stringify({
+                            found: true,
+                            left: Math.round(r.left),
+                            top: Math.round(r.top),
+                            width: Math.round(r.width),
+                            height: Math.round(r.height)
+                        });
+                    }
+                    return JSON.stringify({ found: false });
+                })();
+                """.trimIndent()
+            ) { raw ->
+                try {
+                    val unescaped = raw?.replace("\\\"", "\"")?.trim('"', ' ') ?: "{}"
+                    boxDeferred.complete(org.json.JSONObject(unescaped))
+                } catch (e: Exception) {
+                    boxDeferred.complete(info)
+                }
+            }
+
+            val finalBox = boxDeferred.await()
+            takeCurrentScreenshot(
+                pageNumber = pageIdx + 1,
+                foundElement = finalBox.optBoolean("found", info.optBoolean("found", false)),
+                leftCss = finalBox.optInt("left", info.optInt("left", 0)),
+                topCss = finalBox.optInt("top", info.optInt("top", 0)),
+                widthCss = finalBox.optInt("width", info.optInt("width", 0)),
+                heightCss = finalBox.optInt("height", info.optInt("height", 0))
+            )
+
+            pageIdx++
+
+            if (domTotal > 0 && pageIdx >= domTotal) {
+                isAutoCapturing = false
+                break
+            }
+
+            delay(250)
         }
     }
 

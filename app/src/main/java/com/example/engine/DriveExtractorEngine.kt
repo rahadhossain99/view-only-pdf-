@@ -23,35 +23,45 @@ import com.example.data.model.ExtractionEngineMode
 import com.example.data.model.ResolutionQuality
 import com.example.data.storage.HistoryRepository
 import com.example.data.storage.PdfStorageHelper
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.util.Collections
 import java.util.concurrent.ConcurrentSkipListMap
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
-data class PageBoundingBox(
-    val found: Boolean,
+data class PageScrollInspection(
+    val foundPageElement: Boolean,
     val left: Int,
     val top: Int,
     val width: Int,
     val height: Int,
-    val totalDiscovered: Int,
-    val hasCanvas: Boolean = false
+    val domPageCount: Int,
+    val textTotalCount: Int,
+    val hasCanvas: Boolean,
+    val imgSrc: String,
+    val reachedScrollBottom: Boolean,
+    val scrollHeight: Int,
+    val clientHeight: Int
 )
 
 class DriveExtractorEngine(
     private val context: Context,
     private val scope: CoroutineScope
 ) {
-    private var webView: WebView? = null
+    private var ownedWebView: WebView? = null
+    private var activeWebView: WebView? = null
     private var extractedTitle: String? = null
     private var currentResolution: ResolutionQuality = ResolutionQuality.ULTRA
     private var currentEngineMode: ExtractionEngineMode = ExtractionEngineMode.AUTO_HYBRID
@@ -62,15 +72,24 @@ class DriveExtractorEngine(
     private val capturedPagesMap = ConcurrentSkipListMap<Int, String>()
     private val capturedUrlsSet = Collections.synchronizedSet(HashSet<String>())
     private val capturedPageFiles = Collections.synchronizedList(mutableListOf<File>())
+    private val downloadedImgUrls = Collections.synchronizedSet(HashSet<String>())
 
     private val interceptedStreamCount = AtomicInteger(0)
     private val canvasHookCount = AtomicInteger(0)
     private val domTileCount = AtomicInteger(0)
     private val precisionScreenshotCount = AtomicInteger(0)
 
-    private var mainHandler = Handler(Looper.getMainLooper())
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var captureJob: Job? = null
-    private var totalDetectedPages: Int = 1
+    private var totalDetectedPages: Int = 0
+    private var firstInterceptedTemplateUrl: String? = null
+
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(25, TimeUnit.SECONDS)
+        .readTimeout(45, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build()
 
     var onStatusUpdate: ((message: String) -> Unit)? = null
     var onTelemetryUpdate: ((telemetry: EngineTelemetry) -> Unit)? = null
@@ -139,7 +158,8 @@ class DriveExtractorEngine(
                     lower.contains("page=") ||
                     lower.contains("pg=") ||
                     lower.contains("sz=w") ||
-                    lower.contains("=w")
+                    lower.contains("=w") ||
+                    lower.contains("=s")
 
             val isUiAsset = lower.contains("cleardot.gif") ||
                     lower.contains("drive_icon") ||
@@ -147,7 +167,9 @@ class DriveExtractorEngine(
                     lower.contains("default-avatar") ||
                     lower.contains(".svg") ||
                     lower.contains(".ico") ||
-                    lower.contains("fonts.gstatic.com")
+                    lower.contains("fonts.gstatic.com") ||
+                    lower.contains("ssl.gstatic.com") ||
+                    lower.contains(" avatar")
 
             return isDriveOrGoogle && isViewerPath && !isUiAsset
         }
@@ -161,15 +183,31 @@ class DriveExtractorEngine(
         }
 
         fun extractPageNumberFromUrl(url: String): Int? {
-            val pagePatterns = listOf(
+            val zeroIndexedPatterns = listOf(
                 Regex("[?&]page=(\\d+)"),
-                Regex("[?&]pg=(\\d+)"),
+                Regex("[?&]pg=(\\d+)")
+            )
+            for (pattern in zeroIndexedPatterns) {
+                val match = pattern.find(url)
+                if (match != null) {
+                    val raw = match.groupValues[1].toIntOrNull()
+                    if (raw != null) {
+                        // Google Drive viewerng `page=0` is 0-indexed (page=0 -> Page 1, page=1 -> Page 2)
+                        return if (url.contains("viewer") || url.contains("page=0") || url.contains("pg=0")) {
+                            raw + 1
+                        } else {
+                            raw.coerceAtLeast(1)
+                        }
+                    }
+                }
+            }
+
+            val oneIndexedPatterns = listOf(
                 Regex("[?&]p=(\\d+)"),
                 Regex("page_(\\d+)"),
                 Regex("/page/(\\d+)")
             )
-
-            for (pattern in pagePatterns) {
+            for (pattern in oneIndexedPatterns) {
                 val match = pattern.find(url)
                 if (match != null) {
                     return match.groupValues[1].toIntOrNull()
@@ -181,8 +219,8 @@ class DriveExtractorEngine(
         fun upgradeImageUrlResolution(originalUrl: String, quality: ResolutionQuality): String {
             var modified = originalUrl
 
-            val widthRegex = Regex("=w\\d+(-h\\d+)?")
-            val szRegex = Regex("sz=w\\d+")
+            val widthRegex = Regex("=[ws]\\d+(-h\\d+)?(-[a-zA-Z0-9]+)*")
+            val szRegex = Regex("sz=[ws]\\d+")
             val paramWRegex = Regex("([?&])w=\\d+")
 
             if (widthRegex.containsMatchIn(modified)) {
@@ -226,7 +264,7 @@ class DriveExtractorEngine(
             canvasHooksCaptured = canvasHookCount.get(),
             domTilesDiscovered = domTileCount.get(),
             precisionScreenshotsCaptured = precisionScreenshotCount.get(),
-            totalDetectedPages = totalDetectedPages,
+            totalDetectedPages = totalDetectedPages.coerceAtLeast(capturedPageFiles.size).coerceAtLeast(1),
             lastLogMessage = message
         )
         mainHandler.post {
@@ -248,9 +286,12 @@ class DriveExtractorEngine(
         extractedTitle = null
         isExtracting = true
         rawPdfSaved.set(false)
+        totalDetectedPages = 0
+        firstInterceptedTemplateUrl = null
         capturedPagesMap.clear()
         capturedUrlsSet.clear()
         capturedPageFiles.clear()
+        downloadedImgUrls.clear()
         interceptedStreamCount.set(0)
         canvasHookCount.set(0)
         domTileCount.set(0)
@@ -263,19 +304,27 @@ class DriveExtractorEngine(
             return
         }
 
-        emitTelemetry("Tier 1: Stream & Browser Init", "Initializing ${engineMode.shortBadge} pipeline...")
+        emitTelemetry("Tier 1: Stream & Browser Init", "Initializing ${engineMode.shortBadge} multi-page pipeline...")
 
         mainHandler.post {
             try {
-                val wv = existingWebView ?: WebView(context).also { webView = it }
                 try {
-                    wv.measure(
-                        android.view.View.MeasureSpec.makeMeasureSpec(1200, android.view.View.MeasureSpec.EXACTLY),
-                        android.view.View.MeasureSpec.makeMeasureSpec(1800, android.view.View.MeasureSpec.EXACTLY)
-                    )
-                    wv.layout(0, 0, 1200, 1800)
-                } catch (e: Exception) {
-                    Log.d(TAG, "Layout measurement: ${e.message}")
+                    WebView.enableSlowWholeDocumentDraw()
+                } catch (_: Exception) {}
+
+                val wv = existingWebView ?: WebView(context).also { ownedWebView = it }
+                activeWebView = wv
+
+                if (existingWebView == null || wv.width <= 0 || wv.height <= 0) {
+                    try {
+                        wv.measure(
+                            android.view.View.MeasureSpec.makeMeasureSpec(1080, android.view.View.MeasureSpec.EXACTLY),
+                            android.view.View.MeasureSpec.makeMeasureSpec(1600, android.view.View.MeasureSpec.EXACTLY)
+                        )
+                        wv.layout(0, 0, 1080, 1600)
+                    } catch (e: Exception) {
+                        Log.d(TAG, "Layout measurement: ${e.message}")
+                    }
                 }
                 setupWebView(wv, targetUrl)
             } catch (e: Exception) {
@@ -319,6 +368,9 @@ class DriveExtractorEngine(
                         emitTelemetry("Tier 1: Network Stream", "Intercepted PDF stream candidate (#$streams)")
                     }
                     if (isDriveViewerImageUrl(reqUrl)) {
+                        if (firstInterceptedTemplateUrl == null && (reqUrl.contains("page=") || reqUrl.contains("pg="))) {
+                            firstInterceptedTemplateUrl = reqUrl
+                        }
                         val pageNum = extractPageNumberFromUrl(reqUrl)
                         handleImageDiscovered(reqUrl, pageNum)
                     }
@@ -328,7 +380,7 @@ class DriveExtractorEngine(
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
-                val msg = "Connecting to document & attaching Blob/XHR/Canvas hooks..."
+                val msg = "Connecting to Google Drive & attaching multi-page hooks..."
                 onStatusUpdate?.invoke(msg)
                 emitTelemetry("Tier 1 & 2: Network + Blob Hook", msg)
                 injectEarlyStreamAndBlobHooks(view)
@@ -336,12 +388,12 @@ class DriveExtractorEngine(
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                val msg = "Document loaded. Running ${currentEngineMode.shortBadge} extraction..."
+                val msg = "Document loaded. Detecting all pages for ${currentEngineMode.shortBadge}..."
                 onStatusUpdate?.invoke(msg)
                 injectEarlyStreamAndBlobHooks(view)
                 injectPageScraperAndCaptureScript(view)
 
-                // Start the multi-engine orchestration loop
+                // Start the multi-page extraction orchestration loop
                 startMultiEngineExtractionLoop(view ?: wv)
             }
         }
@@ -353,7 +405,11 @@ class DriveExtractorEngine(
     private fun handleImageDiscovered(rawUrl: String, detectedPageNum: Int?) {
         if (!isExtracting) return
 
-        val cleanBaseUrl = rawUrl.substringBefore("=w").substringBefore("sz=w")
+        val cleanBaseUrl = rawUrl
+            .replace(Regex("=[ws]\\d+(-h\\d+)?(-[a-zA-Z0-9]+)*"), "")
+            .replace(Regex("[?&]w=\\d+"), "")
+            .replace(Regex("[?&]sz=[ws]\\d+"), "")
+
         if (capturedUrlsSet.contains(cleanBaseUrl)) {
             return
         }
@@ -361,10 +417,8 @@ class DriveExtractorEngine(
 
         val highResUrl = upgradeImageUrlResolution(rawUrl, currentResolution)
 
-        val pageNumber = if (detectedPageNum != null && detectedPageNum > 0) {
+        val pageNumber = if (detectedPageNum != null && detectedPageNum > 0 && !capturedPagesMap.containsKey(detectedPageNum)) {
             detectedPageNum
-        } else if (detectedPageNum == 0) {
-            1
         } else {
             val maxKey = capturedPagesMap.keys.maxOrNull() ?: 0
             maxKey + 1
@@ -374,7 +428,10 @@ class DriveExtractorEngine(
         val currentTotal = capturedPagesMap.size
         domTileCount.set(currentTotal)
 
-        emitTelemetry("Tier 3: High-DPI Tile Upgrader", "Discovered high-res page tile #$pageNumber (${currentResolution.label})")
+        emitTelemetry(
+            "Tier 3: High-DPI Tile Upgrader",
+            "Discovered high-res page tile #$pageNumber (Total discovered: $currentTotal)"
+        )
 
         mainHandler.post {
             onPageDiscovered?.invoke(pageNumber, highResUrl, currentTotal)
@@ -383,8 +440,8 @@ class DriveExtractorEngine(
 
     /**
      * Tier 1 & Tier 2 Early Hook:
-     * Hooks URL.createObjectURL, Fetch, and XMLHttpRequest to capture raw PDF blobs or ArrayBuffers
-     * directly from browser memory when a viewer uses PDF.js or Blob streaming.
+     * Hooks URL.createObjectURL, Fetch, XMLHttpRequest, and MutationObserver to capture raw PDF blobs
+     * or dynamically loaded page tile images across all pages.
      */
     private fun injectEarlyStreamAndBlobHooks(view: WebView?) {
         val hookScript = """
@@ -419,43 +476,62 @@ class DriveExtractorEngine(
                         return origCreateObjectURL.apply(this, arguments);
                     };
                 }
-
-                // Observe dynamically added <img> and <canvas> nodes
-                var observer = new MutationObserver(function(mutations) {
-                    try {
-                        var imgs = document.querySelectorAll('img[src*="viewer"], img[src*="googleusercontent"]');
-                        for (var i = 0; i < imgs.length; i++) {
-                            var src = imgs[i].src;
-                            if (src && window.DriveBridge && window.DriveBridge.onPageImageFound) {
-                                window.DriveBridge.onPageImageFound(src, i);
-                            }
-                        }
-                    } catch (e) {}
-                });
-                if (document.documentElement) {
-                    observer.observe(document.documentElement, { childList: true, subtree: true });
-                }
             })();
         """.trimIndent()
         view?.evaluateJavascript(hookScript, null)
     }
 
     /**
-     * Tier 2, 3 & 4 DOM, Canvas & Precision Bounding-Box Controller
+     * Tier 2, 3 & 4 Multi-Page DOM, Image, Canvas & Precision Bounding-Box Controller.
+     * Specifically engineered for Google Drive's `.ndfHFb-c4YZDc-cYSp0e-DARUcf` per-page containers
+     * and `.ndfHFb-c4YZDc-bN97Pc` scrollable viewport.
      */
     private fun injectPageScraperAndCaptureScript(view: WebView?) {
         val jsScript = """
             (function() {
                 window._driveCapture = {
+                    getScrollContainer: function() {
+                        var knownSelectors = [
+                            '.ndfHFb-c4YZDc-bN97Pc',
+                            '.drive-viewer-paginated-scrollable',
+                            '#viewerContainer',
+                            '.ndfHFb-c4YZDc-K9a4Re'
+                        ];
+                        for (var i = 0; i < knownSelectors.length; i++) {
+                            var els = document.querySelectorAll(knownSelectors[i]);
+                            for (var k = 0; k < els.length; k++) {
+                                if (els[k].scrollHeight > els[k].clientHeight + 40) {
+                                    return els[k];
+                                }
+                            }
+                        }
+                        var all = document.querySelectorAll('div, main, [role="main"], [role="document"]');
+                        var best = null;
+                        var maxScrollHeight = 0;
+                        for (var j = 0; j < all.length; j++) {
+                            var el = all[j];
+                            if (el.scrollHeight > el.clientHeight + 60 && el.clientHeight > 150) {
+                                var st = window.getComputedStyle(el);
+                                if (st.overflowY === 'auto' || st.overflowY === 'scroll' || st.overflow === 'auto' || st.overflow === 'scroll' || el.scrollTop > 0) {
+                                    if (el.scrollHeight > maxScrollHeight) {
+                                        maxScrollHeight = el.scrollHeight;
+                                        best = el;
+                                    }
+                                }
+                            }
+                        }
+                        if (best) return best;
+                        return document.scrollingElement || document.documentElement || document.body;
+                    },
+
                     hideChrome: function() {
                         var selectors = [
                             '.drive-viewer-toolstrip',
                             '.drive-viewer-action-bar',
                             '.ndfHFb-c4YZDc-j7LFlb',
+                            '.ndfHFb-c4YZDc-to915-LgbsSe',
                             '.drive-viewer-popout-button',
                             '.drive-viewer-banner',
-                            'header',
-                            '[role="banner"]',
                             '.drive-viewer-navigation-overlay',
                             '#toolbarContainer',
                             '.toolbar'
@@ -463,7 +539,8 @@ class DriveExtractorEngine(
                         for (var i = 0; i < selectors.length; i++) {
                             var els = document.querySelectorAll(selectors[i]);
                             for (var j = 0; j < els.length; j++) {
-                                els[j].style.display = 'none';
+                                els[j].style.opacity = '0';
+                                els[j].style.pointerEvents = 'none';
                             }
                         }
                     },
@@ -472,165 +549,329 @@ class DriveExtractorEngine(
                         try {
                             var title = document.title || "";
                             title = title.replace(" - Google Drive", "").replace(" - Google Docs", "").trim();
-                            var titleElem = document.querySelector('.ndfHFb-c4YZDc-s2gQvd') || 
+                            var titleElem = document.querySelector('.ndfHFb-c4YZDc-s2gQvd') ||
                                             document.querySelector('.drive-viewer-toolstrip-name') ||
                                             document.querySelector('.drive-viewer-title');
-                            if (titleElem && titleElem.innerText) {
-                                title = titleElem.innerText.trim();
+                            if (titleElem && titleElem.textContent) {
+                                var t = titleElem.textContent.trim();
+                                if (t.length > 0) title = t;
                             }
                             return title;
                         } catch(e) { return ""; }
                     },
 
                     findPages: function() {
-                        var selectors = [
+                        // 1. Exact Google Drive & PDF.js individual page container selectors
+                        // NOTE: Never include .ndfHFb-c4YZDc-Wrql6b here as that is the single outer document wrapper!
+                        var pageSelectors = [
+                            '.ndfHFb-c4YZDc-cYSp0e-DARUcf',
                             '.drive-viewer-paginated-page',
-                            '[data-page-index]',
                             '[data-page-number]',
-                            '.ndfHFb-c4YZDc-Wrql6b',
-                            '.drive-viewer-page',
+                            '[data-page-index]',
                             '.pdfViewer .page',
-                            '.page[data-loaded="true"]'
+                            '.drive-viewer-page'
                         ];
-                        for (var s = 0; s < selectors.length; s++) {
-                            var list = document.querySelectorAll(selectors[s]);
+                        for (var s = 0; s < pageSelectors.length; s++) {
+                            var list = document.querySelectorAll(pageSelectors[s]);
                             if (list && list.length > 0) {
+                                var filtered = [];
+                                for (var idx = 0; idx < list.length; idx++) {
+                                    if (list[idx].offsetHeight > 120 || list[idx].clientHeight > 120) {
+                                        filtered.push(list[idx]);
+                                    }
+                                }
+                                if (filtered.length > 0) return filtered;
                                 return Array.from(list);
                             }
                         }
-                        var canvases = document.querySelectorAll('canvas');
-                        if (canvases && canvases.length > 1) {
-                            var validCanvases = [];
-                            for (var c = 0; c < canvases.length; c++) {
-                                if (canvases[c].width > 250 && canvases[c].height > 250) {
-                                    validCanvases.push(canvases[c]);
+
+                        // 2. Structural heuristic: find any parent container inside the viewer that holds >= 2 page-sized children
+                        var allParents = document.querySelectorAll('.ndfHFb-c4YZDc-Wrql6b, .ndfHFb-c4YZDc-cYSp0e-Oz6c3e, div');
+                        var bestChildren = [];
+                        for (var p = 0; p < allParents.length; p++) {
+                            var parent = allParents[p];
+                            var ch = parent.children;
+                            if (!ch || ch.length < 2) continue;
+                            var pageLike = [];
+                            for (var c = 0; c < ch.length; c++) {
+                                var child = ch[c];
+                                var h = child.offsetHeight || child.clientHeight || 0;
+                                var w = child.offsetWidth || child.clientWidth || 0;
+                                if (h > 220 && w > 160 && h < 5000) {
+                                    pageLike.push(child);
                                 }
                             }
-                            if (validCanvases.length > 0) return validCanvases;
-                        }
-                        var container = document.querySelector('.drive-viewer-paginated-scrollable, .ndfHFb-c4YZDc-bN97Pc, [role="main"]');
-                        if (container && container.children) {
-                            var valid = [];
-                            for (var i = 0; i < container.children.length; i++) {
-                                var ch = container.children[i];
-                                if (ch.clientHeight > 250 && ch.clientWidth > 250) {
-                                    valid.push(ch);
-                                }
+                            if (pageLike.length >= 2 && pageLike.length > bestChildren.length) {
+                                bestChildren = pageLike;
                             }
-                            if (valid.length > 0) return valid;
                         }
+                        if (bestChildren.length >= 2) {
+                            return bestChildren;
+                        }
+
+                        // 3. Fallback for 1-page documents
+                        var singlePage = document.querySelector('.ndfHFb-c4YZDc-cYSp0e-DARUcf, .ndfHFb-c4YZDc-cYSp0e-DARUcf-PLDbbf');
+                        if (singlePage) return [singlePage];
+
                         return [];
                     },
 
                     getTotalCount: function() {
-                        var numInputs = document.querySelectorAll('#numPages, .drive-viewer-toolstrip, .ndfHFb-c4YZDc-j7LFlb, div, span');
-                        for (var i = 0; i < numInputs.length; i++) {
-                            var txt = numInputs[i].innerText || "";
-                            var m = /(?:of|\/)\s*(\d+)/i.exec(txt);
-                            if (m && m[1]) {
-                                var cnt = parseInt(m[1], 10);
-                                if (cnt > 0 && cnt < 1000) return cnt;
+                        var domPagesCount = this.findPages().length;
+                        var bestTextTotal = 0;
+
+                        try {
+                            // Check aria-labels first
+                            var ariaNodes = document.querySelectorAll('[aria-label]');
+                            for (var a = 0; a < ariaNodes.length; a++) {
+                                var lbl = ariaNodes[a].getAttribute('aria-label') || '';
+                                var ma = /(?:Page\s+\d+\s*(?:of|\/)\s*|of\s+)(\d+)/i.exec(lbl);
+                                if (ma && ma[1]) {
+                                    var parsedA = parseInt(ma[1], 10);
+                                    if (parsedA > bestTextTotal && parsedA < 2000) bestTextTotal = parsedA;
+                                }
+                            }
+
+                            // Check textContent of toolbar / page counter nodes
+                            var nodes = document.querySelectorAll('.ndfHFb-c4YZDc-j7LFlb, .ndfHFb-c4YZDc-to915-LgbsSe, #numPages, .drive-viewer-toolstrip, span, div');
+                            for (var i = 0; i < nodes.length; i++) {
+                                if (nodes[i].children && nodes[i].children.length > 3) continue;
+                                var txt = (nodes[i].textContent || "").trim();
+                                if (txt.length === 0 || txt.length > 45) continue;
+                                var m1 = /(?:Page\s*\d+\s*(?:of|\/)\s*|\b\d+\s+of\s+|\b\d+\s*\/\s*)(\d+)\b/i.exec(txt);
+                                if (m1 && m1[1]) {
+                                    var cnt = parseInt(m1[1], 10);
+                                    if (cnt > bestTextTotal && cnt < 2000) {
+                                        bestTextTotal = cnt;
+                                    }
+                                }
+                            }
+                        } catch (e) {}
+
+                        var sc = this.getScrollContainer();
+                        var estimatedByScroll = 0;
+                        if (sc && sc.clientHeight > 200 && sc.scrollHeight > sc.clientHeight * 1.4) {
+                            var pages = this.findPages();
+                            var avgPageH = (pages.length > 0 && pages[0].offsetHeight > 200) ? pages[0].offsetHeight : (sc.clientHeight * 0.85);
+                            estimatedByScroll = Math.round(sc.scrollHeight / Math.max(250, avgPageH));
+                        }
+
+                        return Math.max(domPagesCount, bestTextTotal, estimatedByScroll);
+                    },
+
+                    getViewerInitState: function() {
+                        var pages = this.findPages();
+                        var sc = this.getScrollContainer();
+                        var firstReady = false;
+                        if (pages.length > 0) {
+                            var img = pages[0].querySelector ? pages[0].querySelector('img') : null;
+                            var canvas = pages[0].querySelector ? pages[0].querySelector('canvas') : null;
+                            if (img && img.complete && img.naturalWidth > 100) firstReady = true;
+                            if (canvas && canvas.width > 100) firstReady = true;
+                        }
+                        return JSON.stringify({
+                            domPages: pages.length,
+                            totalCount: this.getTotalCount(),
+                            firstReady: firstReady,
+                            scrollHeight: sc ? sc.scrollHeight : 0,
+                            clientHeight: sc ? sc.clientHeight : 0
+                        });
+                    },
+
+                    findPageImageElement: function(pageEl) {
+                        if (!pageEl) return null;
+                        if (pageEl.tagName && pageEl.tagName.toLowerCase() === 'img') return pageEl;
+                        if (!pageEl.querySelectorAll) return null;
+                        var imgs = pageEl.querySelectorAll('img');
+                        var bestImg = null;
+                        var bestArea = 0;
+                        for (var i = 0; i < imgs.length; i++) {
+                            var im = imgs[i];
+                            var src = im.src || '';
+                            if (src.indexOf('cleardot.gif') !== -1 || src.indexOf('.svg') !== -1) continue;
+                            var area = (im.naturalWidth || im.width || 1) * (im.naturalHeight || im.height || 1);
+                            if (area >= bestArea) {
+                                bestArea = area;
+                                bestImg = im;
                             }
                         }
-                        return this.findPages().length;
-                    },
-
-                    scanAllDomTileUrls: function() {
-                        try {
-                            var pages = this.findPages();
-                            for (var i = 0; i < pages.length; i++) {
-                                var img = pages[i].querySelector ? pages[i].querySelector('img') : null;
-                                if (img && img.src && window.DriveBridge) {
-                                    window.DriveBridge.onPageImageFound(img.src, i);
-                                }
-                            }
-                        } catch (e) {}
-                    },
-
-                    extractCanvasBase64ForPage: function(idx) {
-                        try {
-                            var pages = this.findPages();
-                            if (!pages || idx >= pages.length) return "";
-                            var el = pages[idx];
-                            var canvas = (el.tagName && el.tagName.toLowerCase() === 'canvas')
-                                ? el
-                                : (el.querySelector ? el.querySelector('canvas') : null);
-                            if (canvas && canvas.width > 200 && canvas.height > 200) {
-                                var dataUrl = canvas.toDataURL('image/jpeg', 0.94);
-                                if (dataUrl && dataUrl.length > 2000) {
-                                    return dataUrl.split(',')[1] || "";
-                                }
-                            }
-                        } catch (e) {}
-                        return "";
+                        return bestImg;
                     },
 
                     scrollToPage: function(idx) {
                         this.hideChrome();
-                        this.scanAllDomTileUrls();
+                        var sc = this.getScrollContainer();
                         var pages = this.findPages();
-                        if (!pages || pages.length === 0 || idx >= pages.length) {
-                            var sc = document.querySelector('.drive-viewer-paginated-scrollable, .ndfHFb-c4YZDc-bN97Pc') || document.documentElement || document.body;
-                            var step = 1400;
-                            if (sc.scrollTop !== undefined) {
-                                sc.scrollTop = idx * step;
-                            } else {
-                                window.scrollBy(0, step);
+                        var totalCount = this.getTotalCount();
+
+                        if (pages && idx < pages.length) {
+                            var pageEl = pages[idx];
+                            try {
+                                pageEl.scrollIntoView({ behavior: 'instant', block: 'start', inline: 'center' });
+                            } catch (e) {
+                                if (sc) sc.scrollTop = pageEl.offsetTop;
                             }
+
+                            try {
+                                if (sc) sc.dispatchEvent(new Event('scroll', { bubbles: true }));
+                                pageEl.dispatchEvent(new Event('scroll', { bubbles: true }));
+                                window.dispatchEvent(new Event('scroll'));
+                            } catch (e) {}
+
+                            var img = this.findPageImageElement(pageEl);
+                            var imgSrc = (img && img.src) ? img.src : "";
+                            if (imgSrc && window.DriveBridge && window.DriveBridge.onPageImageFound) {
+                                window.DriveBridge.onPageImageFound(imgSrc, idx);
+                            }
+
+                            var hasCanvas = false;
+                            try {
+                                var c = (pageEl.tagName && pageEl.tagName.toLowerCase() === 'canvas')
+                                    ? pageEl
+                                    : (pageEl.querySelector ? pageEl.querySelector('canvas') : null);
+                                hasCanvas = !!(c && c.width > 150 && c.height > 150);
+                            } catch (e) {}
+
+                            var rect = pageEl.getBoundingClientRect();
+                            var atBottom = sc ? (sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 25) : false;
+
                             return JSON.stringify({
-                                found: false,
-                                left: 0,
-                                top: 0,
-                                width: window.innerWidth || 1200,
-                                height: window.innerHeight || 1800,
-                                totalDiscovered: pages ? pages.length : 0,
-                                hasCanvas: false
+                                foundPageElement: true,
+                                left: Math.round(rect.left),
+                                top: Math.round(rect.top),
+                                width: Math.round(rect.width),
+                                height: Math.round(rect.height),
+                                domPageCount: pages.length,
+                                textTotalCount: totalCount,
+                                hasCanvas: hasCanvas,
+                                imgSrc: imgSrc,
+                                reachedScrollBottom: atBottom,
+                                scrollHeight: sc ? sc.scrollHeight : 0,
+                                clientHeight: sc ? sc.clientHeight : 0
                             });
                         }
 
-                        var pageEl = pages[idx];
-                        pageEl.scrollIntoView({ behavior: 'instant', block: 'start', inline: 'center' });
+                        // Fallback continuous scroll when page containers are virtualized or not yet mounted
+                        var curScroll = sc ? sc.scrollTop : (window.pageYOffset || 0);
+                        var cHeight = sc ? sc.clientHeight : (window.innerHeight || 1200);
+                        var sHeight = sc ? sc.scrollHeight : (document.body.scrollHeight || 1200);
+                        var step = Math.max(450, Math.round(cHeight * 0.88));
+
+                        if (idx === 0) {
+                            if (sc) sc.scrollTop = 0;
+                            window.scrollTo(0, 0);
+                        } else {
+                            if (sc) sc.scrollTop = curScroll + step;
+                            window.scrollBy(0, step);
+                        }
 
                         try {
-                            pageEl.dispatchEvent(new Event('scroll', { bubbles: true }));
+                            if (sc) sc.dispatchEvent(new Event('scroll', { bubbles: true }));
                             window.dispatchEvent(new Event('scroll'));
-                        } catch(e) {}
-
-                        var hasCanvas = false;
-                        try {
-                            var c = (pageEl.tagName && pageEl.tagName.toLowerCase() === 'canvas')
-                                ? pageEl
-                                : (pageEl.querySelector ? pageEl.querySelector('canvas') : null);
-                            hasCanvas = !!(c && c.width > 200 && c.height > 200);
                         } catch (e) {}
 
-                        var rect = pageEl.getBoundingClientRect();
+                        var newScroll = sc ? sc.scrollTop : (window.pageYOffset || 0);
+                        var reachedBottom = (idx > 0) && (newScroll + cHeight >= sHeight - 25) && (Math.abs(newScroll - curScroll) < 10);
+
                         return JSON.stringify({
-                            found: true,
-                            left: Math.round(rect.left),
-                            top: Math.round(rect.top),
-                            width: Math.round(rect.width),
-                            height: Math.round(rect.height),
-                            totalDiscovered: pages.length,
-                            hasCanvas: hasCanvas
+                            foundPageElement: false,
+                            left: 0,
+                            top: 0,
+                            width: window.innerWidth || 1080,
+                            height: window.innerHeight || 1600,
+                            domPageCount: pages ? pages.length : 0,
+                            textTotalCount: totalCount,
+                            hasCanvas: false,
+                            imgSrc: "",
+                            reachedScrollBottom: reachedBottom,
+                            scrollHeight: sHeight,
+                            clientHeight: cHeight
                         });
                     },
 
-                    isPageReady: function(idx) {
+                    getPageReadyAndSource: function(idx) {
                         var pages = this.findPages();
-                        if (!pages || idx >= pages.length) return true;
+                        if (!pages || idx >= pages.length) {
+                            return JSON.stringify({ ready: false, imgSrc: "", hasCanvas: false, width: 0, height: 0 });
+                        }
                         var pageEl = pages[idx];
-                        var img = pageEl.querySelector ? pageEl.querySelector('img') : null;
+                        var rect = pageEl.getBoundingClientRect();
+                        var img = this.findPageImageElement(pageEl);
                         if (img) {
-                            return img.complete && img.naturalWidth > 0;
+                            var isLoaded = !!(img.complete && img.naturalWidth > 120 && img.naturalHeight > 120);
+                            var src = img.src || "";
+                            if (isLoaded && src && window.DriveBridge && window.DriveBridge.onPageImageFound) {
+                                window.DriveBridge.onPageImageFound(src, idx);
+                            }
+                            return JSON.stringify({
+                                ready: isLoaded,
+                                imgSrc: src,
+                                hasCanvas: false,
+                                left: Math.round(rect.left),
+                                top: Math.round(rect.top),
+                                width: Math.round(rect.width),
+                                height: Math.round(rect.height)
+                            });
                         }
                         var canvas = (pageEl.tagName && pageEl.tagName.toLowerCase() === 'canvas')
                             ? pageEl
                             : (pageEl.querySelector ? pageEl.querySelector('canvas') : null);
-                        if (canvas) {
-                            return canvas.width > 200 && canvas.height > 200;
+                        if (canvas && canvas.width > 150 && canvas.height > 150) {
+                            return JSON.stringify({
+                                ready: true,
+                                imgSrc: "",
+                                hasCanvas: true,
+                                left: Math.round(rect.left),
+                                top: Math.round(rect.top),
+                                width: Math.round(rect.width),
+                                height: Math.round(rect.height)
+                            });
                         }
-                        return true;
+                        return JSON.stringify({
+                            ready: false,
+                            imgSrc: "",
+                            hasCanvas: false,
+                            left: Math.round(rect.left),
+                            top: Math.round(rect.top),
+                            width: Math.round(rect.width),
+                            height: Math.round(rect.height)
+                        });
+                    },
+
+                    extractPageBitmapBase64: function(idx) {
+                        try {
+                            var pages = this.findPages();
+                            if (!pages || idx >= pages.length) return "";
+                            var pageEl = pages[idx];
+
+                            // 1. Check for <canvas>
+                            var canvas = (pageEl.tagName && pageEl.tagName.toLowerCase() === 'canvas')
+                                ? pageEl
+                                : (pageEl.querySelector ? pageEl.querySelector('canvas') : null);
+                            if (canvas && canvas.width > 150 && canvas.height > 150) {
+                                var cUrl = canvas.toDataURL('image/jpeg', 0.94);
+                                if (cUrl && cUrl.length > 2000) {
+                                    return cUrl.split(',')[1] || "";
+                                }
+                            }
+
+                            // 2. Check for <img> and draw its full naturalWidth x naturalHeight onto an offscreen canvas
+                            var img = this.findPageImageElement(pageEl);
+                            if (img && img.complete && img.naturalWidth > 150 && img.naturalHeight > 150) {
+                                var offCanvas = document.createElement('canvas');
+                                offCanvas.width = img.naturalWidth;
+                                offCanvas.height = img.naturalHeight;
+                                var ctx = offCanvas.getContext('2d');
+                                ctx.fillStyle = '#FFFFFF';
+                                ctx.fillRect(0, 0, offCanvas.width, offCanvas.height);
+                                ctx.drawImage(img, 0, 0, offCanvas.width, offCanvas.height);
+                                var iUrl = offCanvas.toDataURL('image/jpeg', 0.94);
+                                if (iUrl && iUrl.length > 2000) {
+                                    return iUrl.split(',')[1] || "";
+                                }
+                            }
+                        } catch (e) {}
+                        return "";
                     }
                 };
             })();
@@ -642,10 +883,29 @@ class DriveExtractorEngine(
     private fun startMultiEngineExtractionLoop(wv: WebView) {
         captureJob?.cancel()
         captureJob = scope.launch(Dispatchers.Main) {
-            delay(1000)
+            // Poll up to 6.5 seconds for Google Drive's PDF Viewer JS to finish initializing its page containers
+            var initAttempts = 0
+            while (isExtracting && !rawPdfSaved.get() && initAttempts < 15) {
+                delay(420)
+                val initState = fetchViewerInitState(wv)
+                val domPages = initState.first
+                val totalDetected = initState.second
+                val firstReady = initState.third
+
+                if (totalDetected > totalDetectedPages) {
+                    totalDetectedPages = totalDetected
+                    onTotalPagesDetected?.invoke(totalDetected)
+                }
+
+                if (domPages > 0 && (firstReady || initAttempts >= 6)) {
+                    break
+                }
+                initAttempts++
+            }
+
             if (!isExtracting || rawPdfSaved.get()) return@launch
 
-            // 1. Scrape Title
+            // 1. Scrape Document Title
             wv.evaluateJavascript("window._driveCapture ? window._driveCapture.getTitle() : '';") { titleRaw ->
                 val clean = titleRaw?.trim('"', '\\', ' ')?.takeIf { it.isNotBlank() && it != "null" }
                 if (clean != null && extractedTitle == null) {
@@ -654,60 +914,102 @@ class DriveExtractorEngine(
                 }
             }
 
-            // 2. Detect Total Pages
-            wv.evaluateJavascript("window._driveCapture ? window._driveCapture.getTotalCount() : 1;") { countRaw ->
-                val count = countRaw?.trim('"', ' ')?.toIntOrNull() ?: 1
-                if (count > 0) {
-                    totalDetectedPages = count
-                    onTotalPagesDetected?.invoke(count)
-                }
+            // 2. Refresh Total Pages Count
+            val initialTotal = queryTotalCount(wv)
+            if (initialTotal > totalDetectedPages) {
+                totalDetectedPages = initialTotal
+                onTotalPagesDetected?.invoke(initialTotal)
             }
 
-            delay(300)
-            val startMsg = "Running ${currentEngineMode.shortBadge} across $totalDetectedPages detected pages..."
+            val startMsg = if (totalDetectedPages > 1) {
+                "Auto-extracting all $totalDetectedPages pages (${currentEngineMode.shortBadge})..."
+            } else {
+                "Scanning & capturing all document pages (${currentEngineMode.shortBadge})..."
+            }
             onStatusUpdate?.invoke(startMsg)
             emitTelemetry(currentEngineMode.shortBadge, startMsg)
 
             var pageIndex = 0
             var consecutiveMisses = 0
-            val maxLimit = 300
+            val maxLimit = 400
 
             while (isExtracting && !rawPdfSaved.get() && pageIndex < maxLimit) {
                 val pageDisplay = pageIndex + 1
 
-                // Scroll to exact page element and get bounding rect + canvas presence
-                val box = fetchPageBoundingBox(wv, pageIndex)
-
-                // Wait 420ms for Google Drive lazy load / tile or canvas render
-                delay(420)
-
-                val isReady = checkPageReady(wv, pageIndex)
-                if (!isReady) {
-                    delay(350)
+                // Scroll to exact page element (or next scroll viewport)
+                val inspection = scrollAndInspectPage(wv, pageIndex)
+                if (inspection != null) {
+                    val discoveredMax = maxOf(inspection.domPageCount, inspection.textTotalCount)
+                    if (discoveredMax > totalDetectedPages) {
+                        totalDetectedPages = discoveredMax
+                        onTotalPagesDetected?.invoke(totalDetectedPages)
+                    }
                 }
+
+                // If we scrolled past the last DOM page AND reached the bottom of the scroll container, we are done!
+                if (inspection != null &&
+                    pageIndex > 0 &&
+                    !inspection.foundPageElement &&
+                    inspection.reachedScrollBottom
+                ) {
+                    Log.d(TAG, "Reached bottom of scroll container at page index $pageIndex.")
+                    break
+                }
+
+                // Wait for Google Drive to lazy-load the high-res <img> or <canvas> for this specific page
+                // Poll every 250ms up to 3.5 seconds so slower pages never get skipped or captured blank!
+                var readyInfo = pollUntilPageReady(wv, pageIndex, maxWaitMs = 3500L)
+                var pageImgUrl = readyInfo.optString("imgSrc", "").ifBlank { inspection?.imgSrc ?: "" }
+                val hasCanvas = readyInfo.optBoolean("hasCanvas", inspection?.hasCanvas == true)
 
                 val tempFile = File(context.cacheDir, "drive_page_${System.currentTimeMillis()}_$pageDisplay.jpg")
                 var pageSaved = false
 
-                // Tier 2b: If page uses HTML5 <canvas> and mode is AUTO_HYBRID or HIGH_RES_CANVAS_DOM, try direct canvas extraction first
-                if ((currentEngineMode == ExtractionEngineMode.AUTO_HYBRID ||
-                            currentEngineMode == ExtractionEngineMode.HIGH_RES_CANVAS_DOM) &&
-                    box?.hasCanvas == true
-                ) {
-                    val canvasSaved = tryExtractCanvasBitmapToFile(wv, pageIndex, tempFile)
-                    if (canvasSaved && tempFile.length() > 2048) {
+                // STAGE A: Direct Full-Page High-Res Image Download from the page's <img src="...">
+                // This downloads the 100% full, uncropped page image directly from Google's server using WebView cookies!
+                if (pageImgUrl.startsWith("http://") || pageImgUrl.startsWith("https://")) {
+                    val downloaded = downloadPageImageToFile(pageImgUrl, tempFile)
+                    if (downloaded && tempFile.length() > 2048) {
                         pageSaved = true
-                        val hooks = canvasHookCount.incrementAndGet()
+                        domTileCount.incrementAndGet()
                         emitTelemetry(
-                            "Tier 2: HTML5 Canvas Extractor",
-                            "Extracted lossless Canvas bitmap for Page $pageDisplay (#$hooks)"
+                            "Tier 3: High-DPI Full Page Tile",
+                            "Downloaded exact full-size Page $pageDisplay (${currentResolution.label})"
                         )
                     }
                 }
 
-                // Tier 4: Precision Real-Size Page-by-Page Screenshot Cropping (guarantees no split or missing pages)
+                // STAGE B: In-Browser HTML5 <canvas> or <img> naturalWidth x naturalHeight Base64 Extractor
                 if (!pageSaved) {
-                    val screenshotSuccess = captureExactPageScreenshot(wv, box, tempFile)
+                    val canvasSaved = tryExtractPageBitmapBase64ToFile(wv, pageIndex, tempFile)
+                    if (canvasSaved && tempFile.length() > 2048) {
+                        pageSaved = true
+                        val hooks = canvasHookCount.incrementAndGet()
+                        emitTelemetry(
+                            "Tier 2: Canvas / Blob Extractor",
+                            "Extracted full-page bitmap for Page $pageDisplay (#$hooks)"
+                        )
+                    }
+                }
+
+                // STAGE C: Precision Bounding-Box Page Screenshot Fallback
+                if (!pageSaved && (inspection?.foundPageElement == true || pageIndex == 0 || !inspection?.reachedScrollBottom!!)) {
+                    // Refresh bounding rect right before drawing
+                    readyInfo = pollUntilPageReady(wv, pageIndex, maxWaitMs = 300L)
+                    val cropLeft = readyInfo.optInt("left", inspection?.left ?: 0)
+                    val cropTop = readyInfo.optInt("top", inspection?.top ?: 0)
+                    val cropWidth = readyInfo.optInt("width", inspection?.width ?: wv.width)
+                    val cropHeight = readyInfo.optInt("height", inspection?.height ?: wv.height)
+
+                    val screenshotSuccess = captureExactPageScreenshot(
+                        wv = wv,
+                        foundElement = inspection?.foundPageElement == true,
+                        left = cropLeft,
+                        top = cropTop,
+                        width = cropWidth,
+                        height = cropHeight,
+                        outputFile = tempFile
+                    )
                     if (screenshotSuccess && tempFile.length() > 2048) {
                         pageSaved = true
                         precisionScreenshotCount.incrementAndGet()
@@ -718,19 +1020,41 @@ class DriveExtractorEngine(
                     consecutiveMisses = 0
                     capturedPageFiles.add(tempFile)
 
-                    val effectiveTotal = maxOf(totalDetectedPages, box?.totalDiscovered ?: 0, capturedPageFiles.size)
-                    val statusMsg = "Captured Page $pageDisplay of $effectiveTotal (${currentEngineMode.shortBadge})..."
+                    val latestDomPages = inspection?.domPageCount ?: 0
+                    val effectiveTotal = maxOf(totalDetectedPages, latestDomPages, capturedPageFiles.size)
+                    if (effectiveTotal > totalDetectedPages) {
+                        totalDetectedPages = effectiveTotal
+                    }
 
+                    val statusMsg = "Captured Page $pageDisplay of $effectiveTotal (${currentEngineMode.shortBadge})..."
                     onStatusUpdate?.invoke(statusMsg)
                     onPageCaptured?.invoke(pageDisplay, effectiveTotal, statusMsg)
                     emitTelemetry(
-                        "Tier 4: Precision Page Capture",
-                        "Captured exact page $pageDisplay of $effectiveTotal"
+                        "Multi-Page Capture Active",
+                        "Captured full page $pageDisplay of $effectiveTotal"
                     )
 
-                    if (totalDetectedPages > 0 && capturedPageFiles.size >= totalDetectedPages) {
-                        Log.d(TAG, "All $totalDetectedPages pages captured successfully!")
-                        break
+                    // Only stop when we have captured ALL known pages AND:
+                    // - Either totalDetectedPages > 1 and we reached it (with no more DOM pages discovered)
+                    // - Or it's genuinely a 1-page document where domPageCount <= 1 and scrollHeight <= clientHeight * 1.25
+                    if (latestDomPages > 1 && capturedPageFiles.size >= latestDomPages && pageIndex + 1 >= latestDomPages) {
+                        // Scroll once more to check if Google Drive dynamically appends more pages at the bottom
+                        val checkMore = scrollAndInspectPage(wv, pageIndex + 1)
+                        val newDomCount = checkMore?.domPageCount ?: latestDomPages
+                        if (newDomCount <= latestDomPages) {
+                            Log.d(TAG, "Captured all $latestDomPages DOM pages!")
+                            break
+                        } else {
+                            totalDetectedPages = maxOf(totalDetectedPages, newDomCount)
+                        }
+                    } else if (latestDomPages <= 1 && totalDetectedPages <= 1) {
+                        val sHeight = inspection?.scrollHeight ?: 0
+                        val cHeight = (inspection?.clientHeight ?: 1).coerceAtLeast(1)
+                        if (sHeight <= (cHeight * 1.25).toInt()) {
+                            // Genuinely a single-page document
+                            Log.d(TAG, "Single page document confirmed by scrollHeight ($sHeight <= 1.25 * $cHeight).")
+                            break
+                        }
                     }
                 } else {
                     tempFile.delete()
@@ -746,34 +1070,190 @@ class DriveExtractorEngine(
 
             if (rawPdfSaved.get()) return@launch
 
-            // If user explicitly picked HIGH_RES_CANVAS_DOM and we intercepted all high-res tile URLs, use them if they exceed or match
-            if (currentEngineMode == ExtractionEngineMode.HIGH_RES_CANVAS_DOM &&
-                capturedPagesMap.size >= capturedPageFiles.size &&
-                capturedPagesMap.isNotEmpty()
-            ) {
-                capturedPageFiles.forEach { it.delete() }
-                val pagesList = capturedPagesMap.values.toList()
-                onExtractionCompleted?.invoke(pagesList, extractedTitle, pagesList.firstOrNull())
-                return@launch
+            // Fallback Probe: If only <= 1 page was captured via DOM, but we intercepted a `page=` template URL
+            // or discovered more URLs in `capturedPagesMap`, probe remaining pages directly via HTTP!
+            if (capturedPageFiles.size <= 1) {
+                val probeTemplate = firstInterceptedTemplateUrl ?: capturedPagesMap.values.firstOrNull {
+                    it.contains("page=") || it.contains("pg=")
+                }
+                if (probeTemplate != null) {
+                    probeAdditionalPagesViaHttp(probeTemplate)
+                } else if (capturedPagesMap.size > capturedPageFiles.size) {
+                    downloadDiscoveredMapUrlsToFiles()
+                }
             }
 
-            // Compile the captured real-size page files into a native A4 PDF
+            // Compile all captured full-size page files into a native A4 PDF
             if (capturedPageFiles.isNotEmpty()) {
                 compileCapturedFilesToPdf(capturedPageFiles.toList())
             } else if (capturedPagesMap.isNotEmpty()) {
                 val pagesList = capturedPagesMap.values.toList()
                 onExtractionCompleted?.invoke(pagesList, extractedTitle, pagesList.firstOrNull())
             } else {
-                onError?.invoke("Could not capture document pages. Try Interactive Viewer if login is required.")
+                onError?.invoke("Could not capture document pages. Try Interactive Browser if Google sign-in is required.")
             }
         }
     }
 
-    private suspend fun tryExtractCanvasBitmapToFile(wv: WebView, pageIndex: Int, outFile: File): Boolean =
+    /**
+     * Downloads a single page's `<img src="...">` at upgraded resolution (with automatic fallback to original URL)
+     * using the WebView's cookies so protected Google Drive viewer tiles download cleanly.
+     */
+    private suspend fun downloadPageImageToFile(rawImgUrl: String, outFile: File): Boolean = withContext(Dispatchers.IO) {
+        val highResUrl = upgradeImageUrlResolution(rawImgUrl, currentResolution)
+        val candidates = if (highResUrl != rawImgUrl) listOf(highResUrl, rawImgUrl) else listOf(rawImgUrl)
+
+        for (candidateUrl in candidates) {
+            try {
+                val cookie = CookieManager.getInstance().getCookie(candidateUrl)
+                    ?: CookieManager.getInstance().getCookie("https://drive.google.com")
+                val reqBuilder = Request.Builder()
+                    .url(candidateUrl)
+                    .addHeader("User-Agent", DESKTOP_USER_AGENT)
+                    .addHeader("Referer", "https://drive.google.com/")
+                    .addHeader("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+
+                if (!cookie.isNullOrBlank()) {
+                    reqBuilder.addHeader("Cookie", cookie)
+                }
+
+                httpClient.newCall(reqBuilder.build()).execute().use { response ->
+                    if (response.isSuccessful) {
+                        val bytes = response.body?.bytes()
+                        if (bytes != null && bytes.size > 1500) {
+                            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                            if (bmp != null && bmp.width > 120 && bmp.height > 120) {
+                                FileOutputStream(outFile).use { out ->
+                                    bmp.compress(Bitmap.CompressFormat.JPEG, 94, out)
+                                    out.flush()
+                                }
+                                bmp.recycle()
+                                return@withContext true
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "Direct page image download attempt failed: ${e.message}")
+            }
+        }
+        false
+    }
+
+    /**
+     * If Google Drive uses `viewerng/img?id=...&page=0` URLs and DOM capture only got 1 page,
+     * automatically probes page=0, 1, 2, 3... via HTTP with WebView cookies!
+     */
+    private suspend fun probeAdditionalPagesViaHttp(templateUrl: String) = withContext(Dispatchers.IO) {
+        try {
+            val probeFiles = mutableListOf<File>()
+            // Determine whether 0-indexed (`page=0`) or 1-indexed (`page=1`)
+            val page0Url = buildPageUrl(templateUrl, 0, currentResolution)
+            val file0 = File(context.cacheDir, "probe_page_${System.currentTimeMillis()}_0.jpg")
+            val startIndex = if (downloadPageImageToFile(page0Url, file0)) {
+                probeFiles.add(file0)
+                1
+            } else {
+                file0.delete()
+                1
+            }
+
+            var currentIdx = startIndex
+            var misses = 0
+            while (isExtracting && misses < 2 && currentIdx < 300) {
+                val pageNumDisplay = probeFiles.size + 1
+                withContext(Dispatchers.Main) {
+                    val msg = "Probing high-res Page $pageNumDisplay..."
+                    onStatusUpdate?.invoke(msg)
+                    onPageCaptured?.invoke(pageNumDisplay, maxOf(totalDetectedPages, pageNumDisplay), msg)
+                }
+
+                val nextUrl = buildPageUrl(templateUrl, currentIdx, currentResolution)
+                val nextFile = File(context.cacheDir, "probe_page_${System.currentTimeMillis()}_$currentIdx.jpg")
+                if (downloadPageImageToFile(nextUrl, nextFile) && nextFile.length() > 2048) {
+                    misses = 0
+                    probeFiles.add(nextFile)
+                    domTileCount.set(probeFiles.size)
+                } else {
+                    nextFile.delete()
+                    misses++
+                }
+                currentIdx++
+                delay(140)
+            }
+
+            if (probeFiles.size > capturedPageFiles.size) {
+                capturedPageFiles.forEach { it.delete() }
+                capturedPageFiles.clear()
+                capturedPageFiles.addAll(probeFiles)
+            } else {
+                probeFiles.forEach { it.delete() }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "HTTP page probe fallback error: ${e.message}")
+        }
+    }
+
+    private suspend fun downloadDiscoveredMapUrlsToFiles() = withContext(Dispatchers.IO) {
+        val urls = capturedPagesMap.values.toList()
+        val downloaded = mutableListOf<File>()
+        for ((idx, url) in urls.withIndex()) {
+            if (!isExtracting) break
+            val f = File(context.cacheDir, "map_page_${System.currentTimeMillis()}_${idx + 1}.jpg")
+            if (downloadPageImageToFile(url, f) && f.length() > 2048) {
+                downloaded.add(f)
+                withContext(Dispatchers.Main) {
+                    onPageCaptured?.invoke(downloaded.size, urls.size, "Downloaded page ${downloaded.size} of ${urls.size}...")
+                }
+            } else {
+                f.delete()
+            }
+        }
+        if (downloaded.size > capturedPageFiles.size) {
+            capturedPageFiles.forEach { it.delete() }
+            capturedPageFiles.clear()
+            capturedPageFiles.addAll(downloaded)
+        } else {
+            downloaded.forEach { it.delete() }
+        }
+    }
+
+    private suspend fun fetchViewerInitState(wv: WebView): Triple<Int, Int, Boolean> = withContext(Dispatchers.Main) {
+        val deferred = CompletableDeferred<Triple<Int, Int, Boolean>>()
+        wv.evaluateJavascript(
+            "window._driveCapture ? window._driveCapture.getViewerInitState() : '{}';"
+        ) { raw ->
+            try {
+                val unescaped = raw?.replace("\\\"", "\"")?.trim('"', ' ') ?: "{}"
+                val json = JSONObject(unescaped)
+                deferred.complete(
+                    Triple(
+                        json.optInt("domPages", 0),
+                        json.optInt("totalCount", 0),
+                        json.optBoolean("firstReady", false)
+                    )
+                )
+            } catch (e: Exception) {
+                deferred.complete(Triple(0, 0, false))
+            }
+        }
+        deferred.await()
+    }
+
+    private suspend fun queryTotalCount(wv: WebView): Int = withContext(Dispatchers.Main) {
+        val deferred = CompletableDeferred<Int>()
+        wv.evaluateJavascript("window._driveCapture ? window._driveCapture.getTotalCount() : 0;") { countRaw ->
+            val count = countRaw?.trim('"', ' ')?.toIntOrNull() ?: 0
+            deferred.complete(count)
+        }
+        deferred.await()
+    }
+
+    private suspend fun tryExtractPageBitmapBase64ToFile(wv: WebView, pageIndex: Int, outFile: File): Boolean =
         withContext(Dispatchers.Main) {
-            val deferred = kotlinx.coroutines.CompletableDeferred<String>()
+            val deferred = CompletableDeferred<String>()
             wv.evaluateJavascript(
-                "window._driveCapture ? window._driveCapture.extractCanvasBase64ForPage($pageIndex) : '';"
+                "window._driveCapture ? window._driveCapture.extractPageBitmapBase64($pageIndex) : '';"
             ) { b64Raw ->
                 val cleaned = b64Raw?.trim('"', '\\', ' ') ?: ""
                 deferred.complete(cleaned)
@@ -797,42 +1277,69 @@ class DriveExtractorEngine(
             }
         }
 
-    private suspend fun fetchPageBoundingBox(wv: WebView, pageIndex: Int): PageBoundingBox? = withContext(Dispatchers.Main) {
-        val deferred = kotlinx.coroutines.CompletableDeferred<PageBoundingBox?>()
-        wv.evaluateJavascript("window._driveCapture ? window._driveCapture.scrollToPage($pageIndex) : '{}';") { jsonResult ->
-            try {
-                val cleaned = jsonResult?.trim('"', '\\', ' ') ?: "{}"
-                val unescaped = jsonResult?.replace("\\\"", "\"")?.trim('"') ?: "{}"
-                val source = if (unescaped.startsWith("{")) unescaped else cleaned
-                val json = JSONObject(source)
-                val box = PageBoundingBox(
-                    found = json.optBoolean("found", true),
-                    left = json.optInt("left", 0),
-                    top = json.optInt("top", 0),
-                    width = json.optInt("width", wv.width.coerceAtLeast(1080)),
-                    height = json.optInt("height", wv.height.coerceAtLeast(1600)),
-                    totalDiscovered = json.optInt("totalDiscovered", 1),
-                    hasCanvas = json.optBoolean("hasCanvas", false)
-                )
-                deferred.complete(box)
-            } catch (e: Exception) {
-                deferred.complete(null)
+    private suspend fun scrollAndInspectPage(wv: WebView, pageIndex: Int): PageScrollInspection? =
+        withContext(Dispatchers.Main) {
+            val deferred = CompletableDeferred<PageScrollInspection?>()
+            wv.evaluateJavascript("window._driveCapture ? window._driveCapture.scrollToPage($pageIndex) : '{}';") { jsonResult ->
+                try {
+                    val unescaped = jsonResult?.replace("\\\"", "\"")?.trim('"', ' ') ?: "{}"
+                    val json = JSONObject(unescaped)
+                    deferred.complete(
+                        PageScrollInspection(
+                            foundPageElement = json.optBoolean("foundPageElement", false),
+                            left = json.optInt("left", 0),
+                            top = json.optInt("top", 0),
+                            width = json.optInt("width", wv.width.coerceAtLeast(1080)),
+                            height = json.optInt("height", wv.height.coerceAtLeast(1600)),
+                            domPageCount = json.optInt("domPageCount", 0),
+                            textTotalCount = json.optInt("textTotalCount", 0),
+                            hasCanvas = json.optBoolean("hasCanvas", false),
+                            imgSrc = json.optString("imgSrc", ""),
+                            reachedScrollBottom = json.optBoolean("reachedScrollBottom", false),
+                            scrollHeight = json.optInt("scrollHeight", 0),
+                            clientHeight = json.optInt("clientHeight", 0)
+                        )
+                    )
+                } catch (e: Exception) {
+                    deferred.complete(null)
+                }
             }
+            deferred.await()
         }
-        deferred.await()
-    }
 
-    private suspend fun checkPageReady(wv: WebView, pageIndex: Int): Boolean = withContext(Dispatchers.Main) {
-        val deferred = kotlinx.coroutines.CompletableDeferred<Boolean>()
-        wv.evaluateJavascript("window._driveCapture ? window._driveCapture.isPageReady($pageIndex) : true;") { res ->
-            deferred.complete(res?.contains("true") == true)
+    private suspend fun pollUntilPageReady(wv: WebView, pageIndex: Int, maxWaitMs: Long): JSONObject =
+        withContext(Dispatchers.Main) {
+            var elapsed = 0L
+            var lastJson = JSONObject()
+            while (elapsed < maxWaitMs && isExtracting) {
+                val deferred = CompletableDeferred<JSONObject>()
+                wv.evaluateJavascript(
+                    "window._driveCapture ? window._driveCapture.getPageReadyAndSource($pageIndex) : '{}';"
+                ) { raw ->
+                    try {
+                        val unescaped = raw?.replace("\\\"", "\"")?.trim('"', ' ') ?: "{}"
+                        deferred.complete(JSONObject(unescaped))
+                    } catch (e: Exception) {
+                        deferred.complete(JSONObject())
+                    }
+                }
+                lastJson = deferred.await()
+                if (lastJson.optBoolean("ready", false)) {
+                    return@withContext lastJson
+                }
+                delay(240)
+                elapsed += 240
+            }
+            lastJson
         }
-        deferred.await()
-    }
 
     private fun captureExactPageScreenshot(
         wv: WebView,
-        box: PageBoundingBox?,
+        foundElement: Boolean,
+        left: Int,
+        top: Int,
+        width: Int,
+        height: Int,
         outputFile: File
     ): Boolean {
         return try {
@@ -842,13 +1349,16 @@ class DriveExtractorEngine(
             val canvas = Canvas(fullBitmap)
             wv.draw(canvas)
 
-            // Precision crop: if page bounding box is found and has realistic page dimensions, crop to it
-            val cropBitmap: Bitmap = if (box != null && box.found && box.width > 200 && box.height > 200) {
-                val safeX = box.left.coerceIn(0, (w - 100).coerceAtLeast(0))
-                val safeY = box.top.coerceIn(0, (h - 100).coerceAtLeast(0))
-                val safeW = box.width.coerceIn(100, (w - safeX).coerceAtLeast(100))
-                val safeH = box.height.coerceIn(100, (h - safeY).coerceAtLeast(100))
-                Bitmap.createBitmap(fullBitmap, safeX, safeY, safeW, safeH)
+            // Density scale factor between CSS pixels (from getBoundingClientRect) and Android View pixels
+            @Suppress("DEPRECATION")
+            val scale = wv.scale.takeIf { it > 0.1f } ?: context.resources.displayMetrics.density
+
+            val cropBitmap: Bitmap = if (foundElement && width > 120 && height > 120) {
+                val pxLeft = (left * scale).toInt().coerceIn(0, (w - 100).coerceAtLeast(0))
+                val pxTop = (top * scale).toInt().coerceIn(0, (h - 100).coerceAtLeast(0))
+                val pxWidth = (width * scale).toInt().coerceIn(100, (w - pxLeft).coerceAtLeast(100))
+                val pxHeight = (height * scale).toInt().coerceIn(100, (h - pxTop).coerceAtLeast(100))
+                Bitmap.createBitmap(fullBitmap, pxLeft, pxTop, pxWidth, pxHeight)
             } else {
                 fullBitmap
             }
@@ -951,12 +1461,13 @@ class DriveExtractorEngine(
         captureJob?.cancel()
         mainHandler.post {
             try {
-                webView?.stopLoading()
-                webView?.destroy()
+                activeWebView?.stopLoading()
+                ownedWebView?.destroy()
             } catch (e: Exception) {
-                Log.w(TAG, "Error destroying WebView", e)
+                Log.w(TAG, "Error stopping/destroying WebView", e)
             }
-            webView = null
+            ownedWebView = null
+            activeWebView = null
         }
     }
 
@@ -971,7 +1482,7 @@ class DriveExtractorEngine(
 
         @JavascriptInterface
         fun onTotalPagesDetected(total: Int) {
-            if (total > 0) {
+            if (total > totalDetectedPages) {
                 totalDetectedPages = total
                 mainHandler.post {
                     onTotalPagesDetected?.invoke(total)

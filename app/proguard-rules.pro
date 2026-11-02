@@ -9,15 +9,18 @@
 -keepclassmembers class * {
     @android.webkit.JavascriptInterface <methods>;
 }
+-keep @androidx.annotation.Keep class * { *; }
+-keep class com.example.engine.DriveExtractorEngine$DriveJsBridge {
+    @android.webkit.JavascriptInterface <methods>;
+}
 
 # Keep data models
 -keepclassmembers class com.example.data.model.** { *; }
 
-
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
-
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Suppress benign warnings from OkHttp/Okio during R8 optimization
+-dontwarn okhttp3.**
+-dontwarn okio.**
+-dontwarn javax.annotation.**
+-dontwarn org.conscrypt.**
+-dontwarn org.bouncycastle.**
+-dontwarn org.openjsse.**

@@ -249,19 +249,22 @@ fun MainScreen(
             }
         }
     ) { innerPadding ->
-        // Hidden offscreen extraction WebView attached to the Window for hardware canvas & page rendering
+        // Active on-screen extraction WebView kept within visible screen bounds so Chromium
+        // IntersectionObserver and Google Drive's lazy-page loader fire for all pages 1..N
         Box(
             modifier = Modifier
-                .size(0.dp)
+                .width(380.dp)
+                .height(580.dp)
                 .graphicsLayer {
-                    alpha = 0f
-                    translationX = -5000f
+                    alpha = 0.02f
                 }
         ) {
             AndroidView(
-                modifier = Modifier.requiredSize(800.dp, 1200.dp),
+                modifier = Modifier.fillMaxSize(),
                 factory = { ctx ->
-                    viewModel.getOrCreateExtractionWebView(ctx)
+                    viewModel.getOrCreateExtractionWebView(ctx).apply {
+                        (parent as? android.view.ViewGroup)?.removeView(this)
+                    }
                 }
             )
         }
