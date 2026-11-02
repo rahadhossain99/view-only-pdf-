@@ -1,6 +1,5 @@
 package com.example.ui.components
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -16,17 +15,15 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.FastForward
-import androidx.compose.material.icons.filled.HourglassEmpty
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.outlined.CloudDownload
 import androidx.compose.material.icons.outlined.FindInPage
+import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -35,23 +32,26 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.data.model.DownloadState
+import com.example.data.model.EngineTelemetry
 
 @Composable
 fun ProgressCard(
     state: DownloadState,
     documentTitle: String?,
+    telemetry: EngineTelemetry = EngineTelemetry(),
     onCancel: () -> Unit,
     onForceCompile: () -> Unit,
     onOpenInteractive: (() -> Unit)? = null,
@@ -61,9 +61,9 @@ fun ProgressCard(
         modifier = modifier
             .fillMaxWidth()
             .testTag("download_progress_card"),
-        shape = RoundedCornerShape(24.dp),
+        shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+            containerColor = MaterialTheme.colorScheme.surface
         ),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
@@ -73,15 +73,33 @@ fun ProgressCard(
                 .padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Header with status and Cancel button
+            // Header with Active Engine Pill and Cancel button
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(modifier = Modifier.weight(1f)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer
+                        ) {
+                            Text(
+                                text = telemetry.activeTierName,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = documentTitle ?: "Processing Document...",
+                        text = documentTitle ?: "Extracting Protected Document...",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface,
@@ -97,9 +115,9 @@ fun ProgressCard(
                 IconButton(
                     onClick = onCancel,
                     modifier = Modifier
-                        .size(36.dp)
+                        .size(40.dp)
                         .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.surface)
+                        .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f))
                         .testTag("cancel_download_button")
                 ) {
                     Icon(
@@ -113,6 +131,34 @@ fun ProgressCard(
 
             // Pipeline Stage Badges
             PipelineStagesRow(state = state)
+
+            // Live 4-Tier Engine Telemetry Strip
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f))
+                    .padding(10.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TelemetryMetricItem(
+                    label = "Streams",
+                    value = "${telemetry.interceptedStreams}"
+                )
+                TelemetryMetricItem(
+                    label = "Canvas",
+                    value = "${telemetry.canvasHooksCaptured}"
+                )
+                TelemetryMetricItem(
+                    label = "DOM Tiles",
+                    value = "${telemetry.domTilesDiscovered}"
+                )
+                TelemetryMetricItem(
+                    label = "Captured",
+                    value = "${telemetry.precisionScreenshotsCaptured}/${telemetry.totalDetectedPages.coerceAtLeast(1)}"
+                )
+            }
 
             // Progress Bar
             val progressVal = getProgressFraction(state)
@@ -131,7 +177,7 @@ fun ProgressCard(
                             .clip(RoundedCornerShape(4.dp))
                             .testTag("linear_progress_bar"),
                         color = MaterialTheme.colorScheme.primary,
-                        trackColor = MaterialTheme.colorScheme.surface
+                        trackColor = MaterialTheme.colorScheme.surfaceVariant
                     )
                 } else {
                     LinearProgressIndicator(
@@ -141,23 +187,38 @@ fun ProgressCard(
                             .clip(RoundedCornerShape(4.dp))
                             .testTag("linear_progress_bar"),
                         color = MaterialTheme.colorScheme.primary,
-                        trackColor = MaterialTheme.colorScheme.surface
+                        trackColor = MaterialTheme.colorScheme.surfaceVariant
                     )
                 }
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = getDetailedStatusText(state),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Speed,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = getDetailedStatusText(state),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1
+                        )
+                    }
                     if (progressVal > 0f) {
                         Text(
                             text = "${(progressVal * 100).toInt()}%",
                             style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.primary
                         )
@@ -165,20 +226,29 @@ fun ProgressCard(
                 }
             }
 
-            // Actions row: Live Viewer & Force Compile
-            val showViewer = onOpenInteractive != null && (state is DownloadState.LoadingWebView || state is DownloadState.InterceptingPages)
-            val showCompile = state is DownloadState.InterceptingPages && state.capturedCount > 0
+            // Actions row: Live Viewer & Instant Compile
+            val capturedSoFar = maxOf(
+                telemetry.precisionScreenshotsCaptured,
+                telemetry.canvasHooksCaptured,
+                telemetry.domTilesDiscovered,
+                if (state is DownloadState.InterceptingPages) state.capturedCount else 0,
+                if (state is DownloadState.DownloadingImages) state.current else 0
+            )
+            val showViewer = onOpenInteractive != null
+            val showCompile = capturedSoFar > 0 && state !is DownloadState.CompilingPdf
 
             if (showViewer || showCompile) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     if (showViewer) {
                         OutlinedButton(
                             onClick = onOpenInteractive!!,
                             shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Visibility,
@@ -187,7 +257,7 @@ fun ProgressCard(
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "Live Viewer",
+                                text = "Live Browser",
                                 style = MaterialTheme.typography.labelMedium
                             )
                         }
@@ -197,17 +267,21 @@ fun ProgressCard(
                         Button(
                             onClick = onForceCompile,
                             shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.weight(1.3f)
+                            modifier = Modifier
+                                .weight(1.3f)
+                                .height(48.dp)
+                                .testTag("force_compile_button")
                         ) {
                             Icon(
                                 imageVector = Icons.Default.FastForward,
-                                contentDescription = "Compile Discovered Pages",
+                                contentDescription = "Compile Captured Pages Now",
                                 modifier = Modifier.size(16.dp)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "Compile (${(state as DownloadState.InterceptingPages).capturedCount} Pages)",
-                                style = MaterialTheme.typography.labelMedium
+                                text = "Build PDF ($capturedSoFar Pages)",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold
                             )
                         }
                     }
@@ -218,10 +292,31 @@ fun ProgressCard(
 }
 
 @Composable
+private fun TelemetryMetricItem(
+    label: String,
+    value: String
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            text = value,
+            style = MaterialTheme.typography.labelMedium,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
 private fun PipelineStagesRow(state: DownloadState) {
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
+        horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically
     ) {
         val stageIndex = when (state) {
@@ -234,22 +329,19 @@ private fun PipelineStagesRow(state: DownloadState) {
         }
 
         StageItem(
-            step = 1,
-            title = "Intercept",
+            title = "1. Hook & Scan",
             icon = Icons.Outlined.FindInPage,
             isCurrent = stageIndex == 1,
             isDone = stageIndex > 1
         )
         StageItem(
-            step = 2,
-            title = "Download",
+            title = "2. Page Capture",
             icon = Icons.Outlined.CloudDownload,
             isCurrent = stageIndex == 2,
             isDone = stageIndex > 2
         )
         StageItem(
-            step = 3,
-            title = "Compile PDF",
+            title = "3. Build A4 PDF",
             icon = Icons.Default.PictureAsPdf,
             isCurrent = stageIndex == 3,
             isDone = stageIndex > 3
@@ -259,22 +351,21 @@ private fun PipelineStagesRow(state: DownloadState) {
 
 @Composable
 private fun StageItem(
-    step: Int,
     title: String,
     icon: ImageVector,
     isCurrent: Boolean,
     isDone: Boolean
 ) {
     val containerColor = when {
-        isDone -> MaterialTheme.colorScheme.primaryContainer
+        isDone -> MaterialTheme.colorScheme.secondaryContainer
         isCurrent -> MaterialTheme.colorScheme.primary
-        else -> MaterialTheme.colorScheme.surface
+        else -> MaterialTheme.colorScheme.surfaceVariant
     }
 
     val contentColor = when {
-        isDone -> MaterialTheme.colorScheme.onPrimaryContainer
+        isDone -> MaterialTheme.colorScheme.onSecondaryContainer
         isCurrent -> MaterialTheme.colorScheme.onPrimary
-        else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+        else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
     }
 
     Column(
@@ -283,7 +374,7 @@ private fun StageItem(
     ) {
         Box(
             modifier = Modifier
-                .size(36.dp)
+                .size(34.dp)
                 .clip(CircleShape)
                 .background(containerColor),
             contentAlignment = Alignment.Center
@@ -291,7 +382,7 @@ private fun StageItem(
             if (isDone) {
                 Icon(
                     imageVector = Icons.Default.Done,
-                    contentDescription = "Done",
+                    contentDescription = "Completed",
                     tint = contentColor,
                     modifier = Modifier.size(18.dp)
                 )
@@ -299,7 +390,7 @@ private fun StageItem(
                 CircularProgressIndicator(
                     color = contentColor,
                     strokeWidth = 2.dp,
-                    modifier = Modifier.size(20.dp)
+                    modifier = Modifier.size(18.dp)
                 )
             } else {
                 Icon(
@@ -322,10 +413,10 @@ private fun StageItem(
 
 private fun getStatusSubtitle(state: DownloadState): String {
     return when (state) {
-        is DownloadState.LoadingWebView -> "Connecting to headless browser engine..."
-        is DownloadState.InterceptingPages -> "Scrolling & capturing page network requests"
-        is DownloadState.DownloadingImages -> "Downloading full-resolution page bitmaps"
-        is DownloadState.CompilingPdf -> "Rendering pages to native PDF document"
+        is DownloadState.LoadingWebView -> "Probing streams, injecting Blob/Canvas hooks & loading document..."
+        is DownloadState.InterceptingPages -> "Intercepting high-DPI page tiles & DOM containers"
+        is DownloadState.DownloadingImages -> "Capturing full-resolution pages without splits or cutoffs"
+        is DownloadState.CompilingPdf -> "Rendering pages into a native A4 PDF document"
         else -> "Working..."
     }
 }
@@ -334,23 +425,23 @@ private fun getDetailedStatusText(state: DownloadState): String {
     return when (state) {
         is DownloadState.LoadingWebView -> state.message
         is DownloadState.InterceptingPages -> "${state.capturedCount} of ~${state.estimatedTotal} pages detected"
-        is DownloadState.DownloadingImages -> "Page ${state.current} / ${state.total} downloaded"
-        is DownloadState.CompilingPdf -> "Rendering page ${state.currentPage} / ${state.totalPages}"
+        is DownloadState.DownloadingImages -> state.message
+        is DownloadState.CompilingPdf -> state.message
         else -> ""
     }
 }
 
 private fun getProgressFraction(state: DownloadState): Float {
     return when (state) {
-        is DownloadState.LoadingWebView -> 0.05f
+        is DownloadState.LoadingWebView -> 0.06f
         is DownloadState.InterceptingPages -> {
             if (state.estimatedTotal > 0) {
-                (state.capturedCount.toFloat() / state.estimatedTotal.toFloat() * 0.35f).coerceIn(0.05f, 0.35f)
+                (state.capturedCount.toFloat() / state.estimatedTotal.toFloat() * 0.35f).coerceIn(0.06f, 0.35f)
             } else {
                 0.15f
             }
         }
-        is DownloadState.DownloadingImages -> 0.35f + (state.percent * 0.40f)
+        is DownloadState.DownloadingImages -> 0.20f + (state.percent * 0.55f)
         is DownloadState.CompilingPdf -> 0.75f + (state.percent * 0.25f)
         is DownloadState.Success -> 1.0f
         else -> 0f

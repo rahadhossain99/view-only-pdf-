@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
@@ -23,6 +24,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -43,15 +45,16 @@ fun SuccessCard(
     successState: DownloadState.Success,
     onOpenPdf: () -> Unit,
     onSharePdf: () -> Unit,
+    onOpenInStudio: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Card(
         modifier = modifier
             .fillMaxWidth()
             .testTag("download_success_card"),
-        shape = RoundedCornerShape(24.dp),
+        shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f)
+            containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f)
         ),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
@@ -59,7 +62,7 @@ fun SuccessCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -69,28 +72,28 @@ fun SuccessCard(
                     modifier = Modifier
                         .size(44.dp)
                         .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.tertiary),
+                        .background(MaterialTheme.colorScheme.secondary),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = Icons.Default.CheckCircle,
                         contentDescription = "Success",
-                        tint = MaterialTheme.colorScheme.onTertiary,
+                        tint = MaterialTheme.colorScheme.onSecondary,
                         modifier = Modifier.size(24.dp)
                     )
                 }
 
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "PDF Ready & Saved!",
+                        text = "PDF Extracted & Saved!",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
                         text = successState.fileName,
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.8f),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1
                     )
                 }
@@ -152,22 +155,51 @@ fun SuccessCard(
                 )
             }
 
-            // Action buttons (Open & Share)
+            // Built-in PDF Viewer & Page Organizer Studio Action
+            if (onOpenInStudio != null) {
+                Button(
+                    onClick = onOpenInStudio,
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("open_in_pdf_studio_button"),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary
+                    )
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AutoFixHigh,
+                        contentDescription = "Open in Built-in PDF Studio",
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "View & Organize Pages in PDF Studio",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            // Secondary Action buttons (Share & External PDF App)
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 OutlinedButton(
                     onClick = onSharePdf,
-                    shape = RoundedCornerShape(14.dp),
+                    shape = RoundedCornerShape(12.dp),
                     modifier = Modifier
-                        .weight(0.4f)
+                        .weight(1f)
+                        .height(46.dp)
                         .testTag("share_pdf_button")
                 ) {
                     Icon(
                         imageVector = Icons.Default.Share,
                         contentDescription = "Share PDF",
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
@@ -176,27 +208,24 @@ fun SuccessCard(
                     )
                 }
 
-                Button(
+                FilledTonalButton(
                     onClick = onOpenPdf,
-                    shape = RoundedCornerShape(14.dp),
+                    shape = RoundedCornerShape(12.dp),
                     modifier = Modifier
-                        .weight(0.6f)
-                        .testTag("open_pdf_button"),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary
-                    )
+                        .weight(1f)
+                        .height(46.dp)
+                        .testTag("open_pdf_button")
                 ) {
                     Icon(
                         imageVector = Icons.Default.OpenInNew,
-                        contentDescription = "Open PDF",
-                        modifier = Modifier.size(18.dp)
+                        contentDescription = "Open Externally",
+                        modifier = Modifier.size(16.dp)
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "Open PDF",
+                        text = "External App",
                         style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.SemiBold
                     )
                 }
             }
