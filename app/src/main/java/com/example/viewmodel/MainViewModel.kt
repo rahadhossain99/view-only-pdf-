@@ -121,9 +121,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _downloadState.value = serviceState
                     if (serviceState is DownloadState.Success) {
                         val cleanName = serviceState.fileName.removeSuffix(".pdf")
-                        if (_customFileName.value.isBlank()) {
-                            _customFileName.value = cleanName
-                        }
                         preloadPdfForStudio(
                             uri = serviceState.uri,
                             localPath = serviceState.localPath,
@@ -188,20 +185,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _currentDocumentTitle.value = null
         _compressionStatus.value = null
 
-        val initialName = _customFileName.value.trim().ifBlank { "Drive_PDF" }
+        if (!PdfStorageHelper.isValidDocumentTitle(_customFileName.value)) {
+            _customFileName.value = ""
+        }
+
+        val initialName = PdfStorageHelper.cleanDocumentTitle(_customFileName.value) ?: "Drive PDF"
         DownloadNotificationHelper.showProgress(
             context = context,
             docName = initialName,
-            percent = 2,
-            detailText = "Connecting to Google Drive document..."
+            percent = 3,
+            detailText = "গুগল ড্রাইভের সাথে সংযোগ হচ্ছে..."
         )
 
         _engineTelemetry.value = EngineTelemetry(
             activeMode = _engineMode.value,
-            activeTierName = "Tier 1: Stream & Export Probe",
-            lastLogMessage = "Probing direct stream & initializing ${_engineMode.value.shortBadge}..."
+            activeTierName = "Stream & Export Probe",
+            lastLogMessage = "ডকুমেন্ট স্ক্যান করা হচ্ছে..."
         )
-        _downloadState.value = DownloadState.LoadingWebView(cleanUrl, "Connecting to document (2%)...")
+        _downloadState.value = DownloadState.LoadingWebView(cleanUrl, "ডকুমেন্ট সংযোগ হচ্ছে (3%)...")
 
         viewModelScope.launch {
             val fileId = DriveExtractorEngine.extractFileId(cleanUrl)
@@ -270,7 +271,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         extractorEngine = engine
 
         engine.customTitleProvider = {
-            _customFileName.value.trim().takeIf { it.isNotBlank() }
+            PdfStorageHelper.cleanDocumentTitle(_customFileName.value)
         }
 
         engine.onTelemetryUpdate = { telemetry ->
@@ -289,9 +290,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         engine.onTitleExtracted = { title ->
-            _currentDocumentTitle.value = title
-            if (_customFileName.value.isBlank()) {
-                _customFileName.value = title.removeSuffix(".pdf")
+            val validTitle = PdfStorageHelper.cleanDocumentTitle(title)
+            if (validTitle != null) {
+                _currentDocumentTitle.value = validTitle
             }
         }
 
@@ -300,7 +301,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (currentState is DownloadState.InterceptingPages) {
                 _downloadState.value = currentState.copy(
                     estimatedTotal = maxOf(currentState.estimatedTotal, total),
-                    message = "Detected $total pages..."
+                    message = "মোট $total টি পেজ পাওয়া গেছে..."
                 )
             }
         }
@@ -322,7 +323,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         engine.onPageCaptured = { pageNum, total, msg ->
             val safeTotal = total.coerceAtLeast(pageNum).coerceAtLeast(1)
-            val pct = (pageNum.toFloat() / safeTotal.toFloat()).coerceIn(0.04f, 0.90f)
+            val pct = ((pageNum.toFloat() / safeTotal.toFloat()) * 0.85f).coerceIn(0.05f, 0.85f)
             _downloadState.value = DownloadState.DownloadingImages(
                 current = pageNum,
                 total = safeTotal,
@@ -335,16 +336,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _downloadState.value = DownloadState.CompilingPdf(
                 currentPage = current,
                 totalPages = total,
-                percent = percent,
+                percent = percent.coerceIn(0.86f, 0.99f),
                 message = msg
             )
         }
 
         engine.onPdfReady = { uri, fileName, pageCount, fileSizeBytes, localPath ->
             val cleanBaseName = fileName.removeSuffix(".pdf")
-            if (_customFileName.value.isBlank()) {
-                _customFileName.value = cleanBaseName
-            }
             _downloadState.value = DownloadState.Success(
                 uri = uri,
                 fileName = fileName,

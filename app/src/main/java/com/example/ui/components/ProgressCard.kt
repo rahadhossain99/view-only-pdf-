@@ -19,16 +19,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.FastForward
-import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -43,6 +39,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.data.model.DownloadState
 import com.example.data.model.EngineTelemetry
+import com.example.data.storage.PdfStorageHelper
 import com.example.ui.theme.SketchCard
 import com.example.ui.theme.SketchCoralWash
 import com.example.ui.theme.SketchCreamWash
@@ -65,7 +62,7 @@ fun ProgressCard(
 ) {
     val progressVal = getProgressFraction(state)
     val animatedProgress by animateFloatAsState(targetValue = progressVal, label = "SketchProgress")
-    val percentInt = (progressVal * 100f).toInt().coerceIn(1, 99)
+    val percentInt = (progressVal * 100f).toInt().coerceIn(2, 99)
 
     val capturedPages = maxOf(
         telemetry.precisionScreenshotsCaptured,
@@ -78,6 +75,10 @@ fun ProgressCard(
         capturedPages
     )
 
+    val displayTitle = PdfStorageHelper.cleanDocumentTitle(customFileName)
+        ?: PdfStorageHelper.cleanDocumentTitle(documentTitle)
+        ?: "পিডিএফ প্রসেসিং চলছে..."
+
     SketchCard(
         modifier = modifier
             .fillMaxWidth()
@@ -85,7 +86,7 @@ fun ProgressCard(
         containerColor = Color.White,
         borderColor = SketchInkBlack,
         shadowColor = SketchInkBlack,
-        cornerRadius = 16.dp,
+        cornerRadius = 18.dp,
         shadowOffset = 4.dp
     ) {
         Column(
@@ -94,33 +95,18 @@ fun ProgressCard(
                 .padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // 1. Top Row: Title + Large Sketch Percentage Badge
+            // 1. Clean Top Row: Document Title + Page Status + Percentage Badge
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.NotificationsActive,
-                            contentDescription = "Notification Active",
-                            tint = SketchInkBlack,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Text(
-                            text = "নোটিফিকেশনে লাইভ প্রগ্রেস চলছে",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = SketchGraphite
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(4.dp))
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
                     Text(
-                        text = customFileName.ifBlank { documentTitle ?: "পিডিএফ তৈরি হচ্ছে..." },
+                        text = displayTitle,
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.ExtraBold,
                         color = SketchInkBlack,
@@ -129,12 +115,13 @@ fun ProgressCard(
                     Text(
                         text = getDetailedStatusText(state, capturedPages, totalPages),
                         style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Medium,
                         color = SketchGraphite,
                         maxLines = 2
                     )
                 }
 
-                Spacer(modifier = Modifier.width(10.dp))
+                Spacer(modifier = Modifier.width(12.dp))
 
                 // Big Sketch Percentage Stamp
                 Box(
@@ -142,12 +129,12 @@ fun ProgressCard(
                         .clip(RoundedCornerShape(12.dp))
                         .background(SketchMarkerYellow)
                         .border(2.dp, SketchInkBlack, RoundedCornerShape(12.dp))
-                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
                         text = "$percentInt%",
-                        style = MaterialTheme.typography.headlineSmall,
+                        style = MaterialTheme.typography.titleLarge,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.ExtraBold,
                         color = SketchInkBlack
@@ -159,7 +146,7 @@ fun ProgressCard(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(22.dp)
+                    .height(20.dp)
                     .clip(RoundedCornerShape(8.dp))
                     .background(SketchCreamWash)
                     .border(1.8.dp, SketchInkBlack, RoundedCornerShape(8.dp))
@@ -187,56 +174,7 @@ fun ProgressCard(
                 }
             }
 
-            // 3. Live Editable PDF File Name while downloading!
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.DriveFileRenameOutline,
-                        contentDescription = null,
-                        tint = SketchInkBlack,
-                        modifier = Modifier.size(15.dp)
-                    )
-                    Text(
-                        text = "ডাউনলোড চলাকালীন পিডিএফ-এর নাম পরিবর্তন করুন:",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = SketchInkBlack
-                    )
-                }
-
-                OutlinedTextField(
-                    value = customFileName,
-                    onValueChange = onCustomFileNameChange,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("progress_pdf_name_input"),
-                    placeholder = {
-                        Text(
-                            text = documentTitle ?: "নতুন পিডিএফ-এর নাম লিখুন...",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = SketchGraphite.copy(alpha = 0.65f)
-                        )
-                    },
-                    singleLine = true,
-                    shape = RoundedCornerShape(10.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedContainerColor = SketchCreamWash.copy(alpha = 0.4f),
-                        unfocusedContainerColor = SketchCreamWash.copy(alpha = 0.25f),
-                        focusedBorderColor = SketchInkBlack,
-                        unfocusedBorderColor = SketchInkBlack.copy(alpha = 0.55f),
-                        focusedTextColor = SketchInkBlack,
-                        unfocusedTextColor = SketchInkBlack
-                    )
-                )
-            }
-
-            // 4. Action Buttons: Instant Save (if pages captured) & Cancel
+            // 3. Action Buttons: Instant Save (if pages captured) & Cancel
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -247,7 +185,7 @@ fun ProgressCard(
                         shape = RoundedCornerShape(10.dp),
                         modifier = Modifier
                             .weight(1.3f)
-                            .height(48.dp)
+                            .height(46.dp)
                             .border(1.8.dp, SketchInkBlack, RoundedCornerShape(10.dp))
                             .testTag("force_compile_button"),
                         colors = ButtonDefaults.buttonColors(
@@ -274,7 +212,7 @@ fun ProgressCard(
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier
                         .weight(1f)
-                        .height(48.dp)
+                        .height(46.dp)
                         .background(SketchCoralWash, RoundedCornerShape(10.dp))
                         .border(1.8.dp, SketchInkBlack, RoundedCornerShape(10.dp))
                         .testTag("cancel_download_button")
@@ -304,32 +242,45 @@ private fun getDetailedStatusText(
     totalPages: Int
 ): String {
     return when (state) {
-        is DownloadState.LoadingWebView -> "ডকুমেন্ট লোড হচ্ছে এবং পেজ স্ক্যান করা হচ্ছে..."
-        is DownloadState.InterceptingPages -> "পেজ স্ক্যান চলছে ($capturedPages / ~$totalPages পেজ)..."
+        is DownloadState.LoadingWebView -> "গুগল ড্রাইভ থেকে পেজ স্ক্যান করা হচ্ছে..."
+        is DownloadState.InterceptingPages -> "পেজ শনাক্ত করা হচ্ছে ($capturedPages / ~$totalPages পেজ)..."
         is DownloadState.DownloadingImages -> {
             if (totalPages > 0) {
-                "পেজ ${state.current} / $totalPages স্ক্রিনশট নেওয়া হয়েছে..."
+                "পেজ ${state.current} / $totalPages প্রস্তুত হয়েছে..."
             } else {
                 state.message
             }
         }
-        is DownloadState.CompilingPdf -> "সবগুলো পেজ যুক্ত করে পারফেক্ট পিডিএফ তৈরি হচ্ছে..."
+        is DownloadState.CompilingPdf -> {
+            if (state.totalPages > 0) {
+                "পিডিএফ বাইন্ডিং চলছে (${state.currentPage} / ${state.totalPages} পেজ)..."
+            } else {
+                "সবগুলো পেজ যুক্ত করে পিডিএফ তৈরি হচ্ছে..."
+            }
+        }
         else -> "কাজ চলছে..."
     }
 }
 
 private fun getProgressFraction(state: DownloadState): Float {
     return when (state) {
-        is DownloadState.LoadingWebView -> 0.05f
+        is DownloadState.LoadingWebView -> 0.04f
         is DownloadState.InterceptingPages -> {
             if (state.estimatedTotal > 0) {
-                (state.capturedCount.toFloat() / state.estimatedTotal.toFloat() * 0.40f).coerceIn(0.06f, 0.40f)
+                (state.capturedCount.toFloat() / state.estimatedTotal.toFloat() * 0.35f).coerceIn(0.05f, 0.35f)
             } else {
-                0.12f
+                0.10f
             }
         }
-        is DownloadState.DownloadingImages -> state.percent.coerceIn(0.06f, 0.90f)
-        is DownloadState.CompilingPdf -> state.percent.coerceIn(0.90f, 0.99f)
+        is DownloadState.DownloadingImages -> state.percent.coerceIn(0.05f, 0.85f)
+        is DownloadState.CompilingPdf -> {
+            if (state.percent >= 0.85f) {
+                state.percent.coerceIn(0.86f, 0.99f)
+            } else {
+                val frac = state.currentPage.toFloat() / state.totalPages.coerceAtLeast(1).toFloat()
+                (0.86f + frac * 0.13f).coerceIn(0.86f, 0.99f)
+            }
+        }
         is DownloadState.Success -> 1.0f
         else -> 0f
     }

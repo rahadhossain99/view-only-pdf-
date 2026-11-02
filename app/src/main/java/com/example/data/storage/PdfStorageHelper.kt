@@ -18,20 +18,56 @@ import java.util.Locale
 
 object PdfStorageHelper {
 
-    fun generateFileName(customTitle: String? = null): String {
-        val cleaned = customTitle
+    private val INVALID_LOADING_TITLES = listOf(
+        "লোড হচ্ছে",
+        "লোড হচ্ছে...",
+        "loading",
+        "loading...",
+        "google drive",
+        "google docs",
+        "drive",
+        "untitled",
+        "null",
+        "undefined",
+        "পিডিএফ তৈরি হচ্ছে"
+    )
+
+    fun isValidDocumentTitle(rawTitle: String?): Boolean {
+        if (rawTitle.isNullOrBlank()) return false
+        val normalized = rawTitle
+            .trim()
+            .removeSuffix(".pdf")
+            .removeSuffix(".PDF")
+            .trim('.', ' ', '_', '-')
+            .lowercase(Locale.ROOT)
+        if (normalized.length < 2) return false
+        if (INVALID_LOADING_TITLES.any { normalized == it || normalized.startsWith("লোড হচ্ছে") || normalized.startsWith("loading") }) {
+            return false
+        }
+        return true
+    }
+
+    fun cleanDocumentTitle(rawTitle: String?): String? {
+        if (!isValidDocumentTitle(rawTitle)) return null
+        return rawTitle
             ?.trim()
             ?.removeSuffix(".pdf")
             ?.removeSuffix(".PDF")
+            ?.replace(" - Google Drive", "", ignoreCase = true)
+            ?.replace(" - Google Docs", "", ignoreCase = true)
             ?.replace(Regex("[/\\\\:*?\"<>|\\r\\n\\t]"), "_")
-            ?.trim()
+            ?.trim('.', ' ', '_')
             ?.take(65)
+            ?.takeIf { isValidDocumentTitle(it) }
+    }
 
+    fun generateFileName(customTitle: String? = null): String {
+        val cleaned = cleanDocumentTitle(customTitle)
         return if (!cleaned.isNullOrBlank()) {
             "$cleaned.pdf"
         } else {
-            val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-            "SketchPDF_$timeStamp.pdf"
+            val timeStamp = SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault()).format(Date())
+            "Drive_Document_$timeStamp.pdf"
         }
     }
 

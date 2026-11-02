@@ -1,5 +1,10 @@
 package com.example.ui.components
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -72,12 +77,17 @@ fun SuccessCard(
     onOpenInStudio: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
+    val cleanInitialName = PdfStorageHelper.cleanDocumentTitle(successState.fileName)
+        ?: successState.fileName.removeSuffix(".pdf")
+
     var editableName by remember(successState.fileName) {
-        mutableStateOf(successState.fileName.removeSuffix(".pdf"))
+        mutableStateOf(cleanInitialName)
     }
+    var showRenameBox by remember { mutableStateOf(false) }
 
     LaunchedEffect(successState.fileName) {
-        editableName = successState.fileName.removeSuffix(".pdf")
+        editableName = PdfStorageHelper.cleanDocumentTitle(successState.fileName)
+            ?: successState.fileName.removeSuffix(".pdf")
     }
 
     SketchCard(
@@ -87,7 +97,7 @@ fun SuccessCard(
         containerColor = Color.White,
         borderColor = SketchInkBlack,
         shadowColor = SketchInkBlack,
-        cornerRadius = 16.dp,
+        cornerRadius = 18.dp,
         shadowOffset = 4.dp
     ) {
         Column(
@@ -96,7 +106,7 @@ fun SuccessCard(
                 .padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // 1. Success Header with 100% Stamp
+            // 1. Success Header + Quick Rename Toggle
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -104,9 +114,9 @@ fun SuccessCard(
                 Box(
                     modifier = Modifier
                         .size(44.dp)
-                        .clip(RoundedCornerShape(10.dp))
+                        .clip(RoundedCornerShape(12.dp))
                         .background(SketchMintWash)
-                        .border(2.dp, SketchInkBlack, RoundedCornerShape(10.dp)),
+                        .border(2.dp, SketchInkBlack, RoundedCornerShape(12.dp)),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
@@ -132,6 +142,36 @@ fun SuccessCard(
                         maxLines = 1
                     )
                 }
+
+                // Compact Rename Button
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (showRenameBox) SketchMarkerYellow else SketchCreamWash)
+                        .border(1.4.dp, SketchInkBlack, RoundedCornerShape(10.dp))
+                        .clickable { showRenameBox = !showRenameBox }
+                        .padding(horizontal = 10.dp, vertical = 7.dp)
+                        .testTag("toggle_rename_button"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.DriveFileRenameOutline,
+                            contentDescription = "Rename PDF",
+                            tint = SketchInkBlack,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Text(
+                            text = "রিনেম",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = SketchInkBlack
+                        )
+                    }
+                }
             }
 
             // 2. Sketch Info Badges (Pages, Current File Size, Before/After Savings)
@@ -149,42 +189,25 @@ fun SuccessCard(
                 )
                 if (successState.previousSizeBytes != null && successState.previousSizeBytes > successState.fileSizeBytes) {
                     SketchBadge(
-                        text = "আগে ছিল: ${PdfStorageHelper.formatFileSize(successState.previousSizeBytes)}",
+                        text = "আগে: ${PdfStorageHelper.formatFileSize(successState.previousSizeBytes)}",
                         backgroundColor = SketchMintWash
                     )
                 }
             }
 
-            // 3. Inline PDF Rename Box (পিডিএফ-এর নাম পরিবর্তন করুন)
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(SketchCreamWash.copy(alpha = 0.5f))
-                    .border(1.4.dp, SketchInkBlack, RoundedCornerShape(12.dp))
-                    .padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+            // 3. Collapsible PDF Rename Box (When user taps 'রিনেম')
+            AnimatedVisibility(
+                visible = showRenameBox,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically()
             ) {
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.DriveFileRenameOutline,
-                        contentDescription = null,
-                        tint = SketchInkBlack,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Text(
-                        text = "পিডিএফ-এর নাম পরিবর্তন করুন:",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = SketchInkBlack
-                    )
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(SketchCreamWash.copy(alpha = 0.5f))
+                        .border(1.4.dp, SketchInkBlack, RoundedCornerShape(12.dp))
+                        .padding(10.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -194,6 +217,12 @@ fun SuccessCard(
                         modifier = Modifier
                             .weight(1f)
                             .testTag("rename_pdf_input"),
+                        placeholder = {
+                            Text(
+                                text = "নতুন নাম লিখুন...",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        },
                         singleLine = true,
                         shape = RoundedCornerShape(10.dp),
                         colors = OutlinedTextFieldDefaults.colors(
@@ -207,12 +236,15 @@ fun SuccessCard(
                     )
 
                     Button(
-                        onClick = { onRenamePdf(editableName) },
+                        onClick = {
+                            onRenamePdf(editableName)
+                            showRenameBox = false
+                        },
                         enabled = editableName.isNotBlank() &&
                                 editableName.trim() != successState.fileName.removeSuffix(".pdf"),
                         shape = RoundedCornerShape(10.dp),
                         modifier = Modifier
-                            .height(52.dp)
+                            .height(50.dp)
                             .border(1.6.dp, SketchInkBlack, RoundedCornerShape(10.dp))
                             .testTag("save_rename_button"),
                         colors = ButtonDefaults.buttonColors(
@@ -237,7 +269,7 @@ fun SuccessCard(
                 }
             }
 
-            // 4. Post-Creation PDF Size Reducer / Compressor (সাইজ কমানোর অপশন)
+            // 4. Post-Download 1-Tap PDF Size Reducer (সাইজ কমানোর অপশন)
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -265,7 +297,7 @@ fun SuccessCard(
                             color = SketchInkBlack
                         )
                         Text(
-                            text = "পিডিএফ সাইজ বড় হলে এক ট্যাপে সাইজ কমিয়ে নিন:",
+                            text = "সাইজ আরও ছোট করতে এক ট্যাপে কম্প্রেস করুন:",
                             style = MaterialTheme.typography.labelSmall,
                             color = SketchGraphite
                         )
@@ -344,13 +376,13 @@ fun SuccessCard(
                 }
             }
 
-            // 5. Primary Action: Open in Files / Downloads App (ফাইলস-এ ওপেন করুন)
+            // 5. Primary Action: Open in Files / Downloads App
             Button(
                 onClick = onOpenInFiles,
                 shape = RoundedCornerShape(12.dp),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(52.dp)
+                    .height(50.dp)
                     .border(2.dp, SketchInkBlack, RoundedCornerShape(12.dp))
                     .testTag("open_in_files_button"),
                 colors = ButtonDefaults.buttonColors(
@@ -361,11 +393,11 @@ fun SuccessCard(
                 Icon(
                     imageVector = Icons.Default.FolderOpen,
                     contentDescription = "Open in Files",
-                    modifier = Modifier.size(20.dp)
+                    modifier = Modifier.size(19.dp)
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "Open in Files (ফাইলস-এ দেখুন)",
+                    text = "ফাইলস-এ দেখুন (Open in Files)",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.ExtraBold
                 )
@@ -381,7 +413,7 @@ fun SuccessCard(
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier
                         .weight(1f)
-                        .height(48.dp)
+                        .height(46.dp)
                         .background(SketchMarkerYellow, RoundedCornerShape(10.dp))
                         .border(1.8.dp, SketchInkBlack, RoundedCornerShape(10.dp))
                         .testTag("open_pdf_button")
@@ -406,7 +438,7 @@ fun SuccessCard(
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier
                         .weight(1f)
-                        .height(48.dp)
+                        .height(46.dp)
                         .background(Color.White, RoundedCornerShape(10.dp))
                         .border(1.8.dp, SketchInkBlack, RoundedCornerShape(10.dp))
                         .testTag("share_pdf_button")

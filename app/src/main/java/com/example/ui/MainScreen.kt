@@ -8,7 +8,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -17,11 +16,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -48,9 +51,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -92,7 +93,6 @@ fun MainScreen(
     val isCompressingPdf by viewModel.isCompressingPdf.collectAsState()
     val compressionStatus by viewModel.compressionStatus.collectAsState()
 
-    // Request notification permission on Android 13+ so top bar live % notification works seamlessly
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
         onResult = { }
@@ -118,6 +118,7 @@ fun MainScreen(
     Scaffold(
         modifier = modifier.fillMaxSize(),
         containerColor = Color.Transparent,
+        contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
             SketchTopHeader(
                 onOpenFilesApp = {
@@ -143,26 +144,23 @@ fun MainScreen(
                     .width(380.dp)
                     .height(580.dp)
                     .align(Alignment.TopCenter)
-                    .graphicsLayer { alpha = 0.015f }
+                    .graphicsLayer { alpha = 0.01f }
             )
 
             Box(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .navigationBarsPadding(),
                 contentAlignment = Alignment.TopCenter
             ) {
                 LazyColumn(
                     modifier = Modifier
                         .fillMaxSize()
                         .widthIn(max = 600.dp),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(18.dp)
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 18.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
-                    // 1. Sketch Notebook Banner Note
-                    item {
-                        SketchNotebookNoteBanner()
-                    }
-
-                    // 2. Main White Sketch Input Card (Link + Custom Name + Upfront Size Selector)
+                    // 1. Main Clean Sketch Card (Link Input + Collapsible Options + Download Button)
                     item {
                         UrlInputField(
                             url = inputUrl,
@@ -181,7 +179,7 @@ fun MainScreen(
                         )
                     }
 
-                    // 3. Live Percentage & Progress Sketch Card
+                    // 2. Live Percentage & Progress Sketch Card
                     item {
                         AnimatedVisibility(
                             visible = isLoading,
@@ -203,7 +201,7 @@ fun MainScreen(
                         }
                     }
 
-                    // 4. Completed Sketch Card (Inline Rename + Size Compressor + Open in Files)
+                    // 3. Completed Sketch Card (Size Compressor + Rename + Open in Files)
                     item {
                         val currentSuccess = downloadState as? DownloadState.Success
                         AnimatedVisibility(
@@ -240,7 +238,7 @@ fun MainScreen(
                         }
                     }
 
-                    // 5. Error Sketch Card (if any error occurred)
+                    // 4. Error Sketch Card (if any error occurred)
                     item {
                         val currentError = downloadState as? DownloadState.Error
                         AnimatedVisibility(
@@ -292,6 +290,7 @@ private fun SketchTopHeader(
         modifier = Modifier
             .fillMaxWidth()
             .background(Color.White)
+            .statusBarsPadding()
     ) {
         Row(
             modifier = Modifier
@@ -302,7 +301,8 @@ private fun SketchTopHeader(
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.weight(1f)
             ) {
                 Box(
                     modifier = Modifier
@@ -316,20 +316,22 @@ private fun SketchTopHeader(
                         imageVector = Icons.Default.Draw,
                         contentDescription = "Sketch PDF Logo",
                         tint = SketchInkBlack,
-                        modifier = Modifier.size(22.dp)
+                        modifier = Modifier.size(21.dp)
                     )
                 }
                 Column {
                     Text(
-                        text = "Sketch PDF Downloader",
+                        text = "Sketch PDF",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.ExtraBold,
-                        color = SketchInkBlack
+                        color = SketchInkBlack,
+                        maxLines = 1
                     )
                     Text(
-                        text = "View-Only Drive to Clean Compact PDF",
+                        text = "View-Only Drive Downloader",
                         style = MaterialTheme.typography.labelSmall,
-                        color = SketchGraphite
+                        color = SketchGraphite,
+                        maxLines = 1
                     )
                 }
             }
@@ -385,46 +387,6 @@ private fun SketchTopHeader(
 }
 
 @Composable
-private fun SketchNotebookNoteBanner() {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(SketchMarkerYellow.copy(alpha = 0.65f))
-            .border(1.5.dp, SketchInkBlack, RoundedCornerShape(12.dp))
-            .padding(horizontal = 14.dp, vertical = 10.dp)
-    ) {
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(
-                text = "✦ ফাস্ট ও হালকা সাইজের ভিউ-অনলি পিডিএফ ডাউনলোডার",
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.ExtraBold,
-                color = SketchInkBlack
-            )
-            Text(
-                text = "লিংক দিয়ে নিজের পছন্দমতো নাম ও সাইজ সিলেক্ট করুন। ডাউনলোড শেষে নোটিফিকেশনে বা নিচে 'Open in Files' বাটনে ট্যাপ করলে সরাসরি ফাইলস-এ ওপেন হবে।",
-                style = MaterialTheme.typography.bodySmall,
-                color = SketchInkBlack.copy(alpha = 0.85f)
-            )
-            Canvas(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(4.dp)
-                    .padding(top = 2.dp)
-            ) {
-                drawLine(
-                    color = SketchInkBlack.copy(alpha = 0.35f),
-                    start = Offset(0f, 0f),
-                    end = Offset(size.width, 0f),
-                    strokeWidth = 1.dp.toPx(),
-                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f)
-                )
-            }
-        }
-    }
-}
-
-@Composable
 private fun SketchErrorCard(
     error: DownloadState.Error,
     onRetry: () -> Unit,
@@ -437,7 +399,7 @@ private fun SketchErrorCard(
         containerColor = SketchCoralWash,
         borderColor = SketchInkBlack,
         shadowColor = SketchInkBlack,
-        cornerRadius = 16.dp,
+        cornerRadius = 18.dp,
         shadowOffset = 4.dp
     ) {
         Column(

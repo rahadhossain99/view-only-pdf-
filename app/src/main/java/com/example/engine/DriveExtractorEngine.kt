@@ -549,16 +549,34 @@ class DriveExtractorEngine(
 
                     getTitle: function() {
                         try {
-                            var title = document.title || "";
-                            title = title.replace(" - Google Drive", "").replace(" - Google Docs", "").trim();
+                            function isInvalid(str) {
+                                if (!str) return true;
+                                var s = str.trim().toLowerCase();
+                                if (s.length < 2) return true;
+                                if (s.indexOf('লোড হচ্ছে') !== -1 || s.indexOf('loading') !== -1) return true;
+                                if (s === 'google drive' || s === 'google docs' || s === 'drive') return true;
+                                return false;
+                            }
+                            var candidates = [];
                             var titleElem = document.querySelector('.ndfHFb-c4YZDc-s2gQvd') ||
                                             document.querySelector('.drive-viewer-toolstrip-name') ||
                                             document.querySelector('.drive-viewer-title');
                             if (titleElem && titleElem.textContent) {
-                                var t = titleElem.textContent.trim();
-                                if (t.length > 0) title = t;
+                                candidates.push(titleElem.textContent.trim());
                             }
-                            return title;
+                            var ogTitle = document.querySelector('meta[property="og:title"]') ||
+                                          document.querySelector('meta[itemprop="name"]');
+                            if (ogTitle && ogTitle.content) {
+                                candidates.push(ogTitle.content.trim());
+                            }
+                            if (document.title) {
+                                candidates.push(document.title.replace(" - Google Drive", "").replace(" - Google Docs", "").trim());
+                            }
+                            for (var i = 0; i < candidates.length; i++) {
+                                var c = candidates[i].replace(" - Google Drive", "").replace(" - Google Docs", "").trim();
+                                if (!isInvalid(c)) return c;
+                            }
+                            return "";
                         } catch(e) { return ""; }
                     },
 
@@ -907,9 +925,9 @@ class DriveExtractorEngine(
 
             if (!isExtracting || rawPdfSaved.get()) return@launch
 
-            // 1. Scrape Document Title
+            // 1. Scrape Document Title (ignoring loading placeholders)
             wv.evaluateJavascript("window._driveCapture ? window._driveCapture.getTitle() : '';") { titleRaw ->
-                val clean = titleRaw?.trim('"', '\\', ' ')?.takeIf { it.isNotBlank() && it != "null" }
+                val clean = PdfStorageHelper.cleanDocumentTitle(titleRaw?.trim('"', '\\', ' '))
                 if (clean != null && extractedTitle == null) {
                     extractedTitle = clean
                     onTitleExtracted?.invoke(clean)
@@ -924,9 +942,9 @@ class DriveExtractorEngine(
             }
 
             val startMsg = if (totalDetectedPages > 1) {
-                "Auto-extracting all $totalDetectedPages pages (${currentEngineMode.shortBadge})..."
+                "Auto-extracting all $totalDetectedPages pages..."
             } else {
-                "Scanning & capturing all document pages (${currentEngineMode.shortBadge})..."
+                "Scanning & capturing document pages..."
             }
             onStatusUpdate?.invoke(startMsg)
             emitTelemetry(currentEngineMode.shortBadge, startMsg)
@@ -938,6 +956,17 @@ class DriveExtractorEngine(
             while (isExtracting && !rawPdfSaved.get() && pageIndex < maxLimit) {
                 val pageDisplay = pageIndex + 1
 
+                // Refresh document title if it was still loading when page 1 started
+                if (extractedTitle == null && (pageIndex == 1 || pageIndex == 3)) {
+                    wv.evaluateJavascript("window._driveCapture ? window._driveCapture.getTitle() : '';") { titleRaw ->
+                        val clean = PdfStorageHelper.cleanDocumentTitle(titleRaw?.trim('"', '\\', ' '))
+                        if (clean != null && extractedTitle == null) {
+                            extractedTitle = clean
+                            onTitleExtracted?.invoke(clean)
+                        }
+                    }
+                }
+
                 // Scroll to exact page element (or next scroll viewport)
                 val inspection = scrollAndInspectPage(wv, pageIndex)
                 if (inspection != null) {
@@ -948,35 +977,34 @@ class DriveExtractorEngine(
                     }
                 }
 
-                // If we scrolled past the last DOM page AND reached the bottom of the scroll container, we are done!
-                if (inspection != null &&
-                    pageIndex > 0 &&
-                    !inspection.foundPageElement &&
-                    inspection.reachedScrollBottom
-                ) {
-                    Log.d(TAG, "Reached bottom of scroll container at page index $pageIndex.")
-                    break
+                // Immediately finish if we scrolled past the last DOM page
+                if (inspection != null && pageIndex > 0 && !inspection.foundPageElement) {
+                    if (inspection.reachedScrollBottom ||
+                        (totalDetectedPages >= 2 && capturedPageFiles.size >= totalDetectedPages) ||
+                        (inspection.domPageCount >= 2 && pageIndex >= inspection.domPageCount)
+                    ) {
+                        Log.d(TAG, "All pages captured at index $pageIndex. Moving directly to PDF compilation.")
+                        break
+                    }
                 }
 
                 // Wait for Google Drive to lazy-load the high-res <img> or <canvas> for this specific page
-                // Poll every 250ms up to 3.5 seconds so slower pages never get skipped or captured blank!
-                var readyInfo = pollUntilPageReady(wv, pageIndex, maxWaitMs = 3500L)
+                val waitBudgetMs = if (inspection?.foundPageElement == true) 2600L else 500L
+                var readyInfo = pollUntilPageReady(wv, pageIndex, maxWaitMs = waitBudgetMs)
                 var pageImgUrl = readyInfo.optString("imgSrc", "").ifBlank { inspection?.imgSrc ?: "" }
-                val hasCanvas = readyInfo.optBoolean("hasCanvas", inspection?.hasCanvas == true)
 
                 val tempFile = File(context.cacheDir, "drive_page_${System.currentTimeMillis()}_$pageDisplay.jpg")
                 var pageSaved = false
 
                 // STAGE A: Direct Full-Page High-Res Image Download from the page's <img src="...">
-                // This downloads the 100% full, uncropped page image directly from Google's server using WebView cookies!
                 if (pageImgUrl.startsWith("http://") || pageImgUrl.startsWith("https://")) {
                     val downloaded = downloadPageImageToFile(pageImgUrl, tempFile)
                     if (downloaded && tempFile.length() > 2048) {
                         pageSaved = true
                         domTileCount.incrementAndGet()
                         emitTelemetry(
-                            "Tier 3: High-DPI Full Page Tile",
-                            "Downloaded exact full-size Page $pageDisplay (${currentResolution.label})"
+                            "High-DPI Full Page Tile",
+                            "Downloaded Page $pageDisplay (${currentResolution.shortTitle})"
                         )
                     }
                 }
@@ -988,16 +1016,15 @@ class DriveExtractorEngine(
                         pageSaved = true
                         val hooks = canvasHookCount.incrementAndGet()
                         emitTelemetry(
-                            "Tier 2: Canvas / Blob Extractor",
+                            "Canvas / Blob Extractor",
                             "Extracted full-page bitmap for Page $pageDisplay (#$hooks)"
                         )
                     }
                 }
 
                 // STAGE C: Precision Bounding-Box Page Screenshot Fallback
-                if (!pageSaved && (inspection?.foundPageElement == true || pageIndex == 0 || !inspection?.reachedScrollBottom!!)) {
-                    // Refresh bounding rect right before drawing
-                    readyInfo = pollUntilPageReady(wv, pageIndex, maxWaitMs = 300L)
+                if (!pageSaved && (inspection?.foundPageElement == true || pageIndex == 0 || inspection?.reachedScrollBottom == false)) {
+                    readyInfo = pollUntilPageReady(wv, pageIndex, maxWaitMs = 220L)
                     val cropLeft = readyInfo.optInt("left", inspection?.left ?: 0)
                     val cropTop = readyInfo.optInt("top", inspection?.top ?: 0)
                     val cropWidth = readyInfo.optInt("width", inspection?.width ?: wv.width)
@@ -1028,20 +1055,20 @@ class DriveExtractorEngine(
                         totalDetectedPages = effectiveTotal
                     }
 
-                    val statusMsg = "Page $pageDisplay of $effectiveTotal extracted..."
+                    val statusMsg = "পেজ $pageDisplay / $effectiveTotal ডাউনলোড হয়েছে..."
                     onStatusUpdate?.invoke(statusMsg)
                     onPageCaptured?.invoke(pageDisplay, effectiveTotal, statusMsg)
 
-                    val activeDocName = customTitleProvider?.invoke()?.takeIf { it.isNotBlank() }
+                    val activeDocName = PdfStorageHelper.cleanDocumentTitle(customTitleProvider?.invoke())
                         ?: extractedTitle
-                        ?: "Protected PDF"
-                    val livePercent = ((pageDisplay.toFloat() / effectiveTotal.coerceAtLeast(1).toFloat()) * 82f)
-                        .toInt().coerceIn(5, 82)
+                        ?: "Drive PDF"
+                    val livePercent = ((pageDisplay.toFloat() / effectiveTotal.coerceAtLeast(1).toFloat()) * 84f)
+                        .toInt().coerceIn(5, 84)
                     DownloadNotificationHelper.showProgress(
                         context = context,
                         docName = activeDocName,
                         percent = livePercent,
-                        detailText = "Extracting Page $pageDisplay of $effectiveTotal"
+                        detailText = "পেজ $pageDisplay / $effectiveTotal প্রস্তুত হয়েছে"
                     )
 
                     emitTelemetry(
@@ -1049,19 +1076,10 @@ class DriveExtractorEngine(
                         "Captured full page $pageDisplay of $effectiveTotal"
                     )
 
-                    // Only stop when we have captured ALL known pages AND:
-                    // - Either totalDetectedPages > 1 and we reached it (with no more DOM pages discovered)
-                    // - Or it's genuinely a 1-page document where domPageCount <= 1 and scrollHeight <= clientHeight * 1.25
-                    if (latestDomPages > 1 && capturedPageFiles.size >= latestDomPages && pageIndex + 1 >= latestDomPages) {
-                        // Scroll once more to check if Google Drive dynamically appends more pages at the bottom
-                        val checkMore = scrollAndInspectPage(wv, pageIndex + 1)
-                        val newDomCount = checkMore?.domPageCount ?: latestDomPages
-                        if (newDomCount <= latestDomPages) {
-                            Log.d(TAG, "Captured all $latestDomPages DOM pages!")
-                            break
-                        } else {
-                            totalDetectedPages = maxOf(totalDetectedPages, newDomCount)
-                        }
+                    // Stop immediately once we have captured all known pages so it never hangs at the end!
+                    if (effectiveTotal >= 2 && capturedPageFiles.size >= effectiveTotal) {
+                        Log.d(TAG, "Captured all $effectiveTotal pages! Proceeding immediately to PDF build.")
+                        break
                     } else if (latestDomPages <= 1 && totalDetectedPages <= 1) {
                         val sHeight = inspection?.scrollHeight ?: 0
                         val cHeight = (inspection?.clientHeight ?: 1).coerceAtLeast(1)
@@ -1073,8 +1091,8 @@ class DriveExtractorEngine(
                 } else {
                     tempFile.delete()
                     consecutiveMisses++
-                    if (consecutiveMisses >= 3) {
-                        Log.d(TAG, "Consecutive misses reached 3 at page $pageDisplay. Finishing capture.")
+                    if (consecutiveMisses >= 2) {
+                        Log.d(TAG, "Consecutive misses reached 2 at page $pageDisplay. Finishing capture.")
                         break
                     }
                 }
@@ -1083,6 +1101,15 @@ class DriveExtractorEngine(
             }
 
             if (rawPdfSaved.get()) return@launch
+
+            // Final title check before compiling
+            if (extractedTitle == null) {
+                val finalScrapedTitle = queryDocumentTitle(wv)
+                if (finalScrapedTitle != null) {
+                    extractedTitle = finalScrapedTitle
+                    onTitleExtracted?.invoke(finalScrapedTitle)
+                }
+            }
 
             // Fallback Probe: If only <= 1 page was captured via DOM, but we intercepted a `page=` template URL
             // or discovered more URLs in `capturedPagesMap`, probe remaining pages directly via HTTP!
@@ -1105,7 +1132,7 @@ class DriveExtractorEngine(
                 onExtractionCompleted?.invoke(pagesList, extractedTitle, pagesList.firstOrNull())
             } else {
                 DownloadNotificationHelper.cancelProgress(context)
-                onError?.invoke("Could not capture document pages. Try Sign-In Preview if Google login is required.")
+                onError?.invoke("পেজ ডাউনলোড করা যায়নি। লিংকটি প্রাইভেট হলে উপরের ব্রাউজার আইকনে ট্যাপ করে লগইন করুন।")
             }
         }
     }
@@ -1264,6 +1291,15 @@ class DriveExtractorEngine(
         deferred.await()
     }
 
+    private suspend fun queryDocumentTitle(wv: WebView): String? = withContext(Dispatchers.Main) {
+        val deferred = CompletableDeferred<String?>()
+        wv.evaluateJavascript("window._driveCapture ? window._driveCapture.getTitle() : '';") { titleRaw ->
+            val cleaned = PdfStorageHelper.cleanDocumentTitle(titleRaw?.trim('"', '\\', ' '))
+            deferred.complete(cleaned)
+        }
+        deferred.await()
+    }
+
     private suspend fun tryExtractPageBitmapBase64ToFile(wv: WebView, pageIndex: Int, outFile: File): Boolean =
         withContext(Dispatchers.Main) {
             val deferred = CompletableDeferred<String>()
@@ -1397,19 +1433,19 @@ class DriveExtractorEngine(
     private fun compileCapturedFilesToPdf(files: List<File>) {
         scope.launch(Dispatchers.IO) {
             try {
-                val resolvedTitle = customTitleProvider?.invoke()?.takeIf { it.isNotBlank() }
-                    ?: extractedTitle
-                    ?: "SketchPDF_${System.currentTimeMillis()}"
+                val resolvedTitle = PdfStorageHelper.cleanDocumentTitle(customTitleProvider?.invoke())
+                    ?: PdfStorageHelper.cleanDocumentTitle(extractedTitle)
+                    ?: "Drive_Document"
 
                 withContext(Dispatchers.Main) {
-                    val msg = "Building compact PDF (${files.size} pages)..."
+                    val msg = "কম্প্যাক্ট পিডিএফ তৈরি হচ্ছে (${files.size} পেজ)..."
                     onStatusUpdate?.invoke(msg)
                     emitTelemetry("PDF Compiler", msg)
-                    onCompilingPdf?.invoke(1, files.size, 0.1f, msg)
+                    onCompilingPdf?.invoke(1, files.size, 0.86f, msg)
                     DownloadNotificationHelper.showProgress(
                         context = context,
                         docName = resolvedTitle,
-                        percent = 85,
+                        percent = 86,
                         detailText = msg
                     )
                 }
@@ -1422,19 +1458,25 @@ class DriveExtractorEngine(
                     jpegQuality = currentResolution.jpegQuality
                 ) { current, total ->
                     val fraction = current.toFloat() / total.coerceAtLeast(1)
-                    val overallPercent = 85 + (fraction * 14f).toInt()
+                    val smoothOverallFraction = (0.86f + (fraction * 0.13f)).coerceIn(0.86f, 0.99f)
+                    val overallPercent = (smoothOverallFraction * 100f).toInt().coerceIn(86, 99)
                     scope.launch(Dispatchers.Main) {
-                        onCompilingPdf?.invoke(current, total, fraction, "Packing page $current of $total into PDF...")
+                        onCompilingPdf?.invoke(
+                            current,
+                            total,
+                            smoothOverallFraction,
+                            "পিডিএফ বাইন্ডিং চলছে: পেজ $current / $total..."
+                        )
                         DownloadNotificationHelper.showProgress(
                             context = context,
                             docName = resolvedTitle,
                             percent = overallPercent,
-                            detailText = "Packing page $current of $total..."
+                            detailText = "পিডিএফ বাইন্ডিং চলছে ($current/$total)..."
                         )
                     }
                 }
 
-                val finalTitle = customTitleProvider?.invoke()?.takeIf { it.isNotBlank() } ?: resolvedTitle
+                val finalTitle = PdfStorageHelper.cleanDocumentTitle(customTitleProvider?.invoke()) ?: resolvedTitle
                 val safeFileName = PdfStorageHelper.generateFileName(finalTitle)
 
                 val savedUri = PdfStorageHelper.savePdfToDownloads(context, pdfBytes, safeFileName).getOrNull()
@@ -1518,9 +1560,12 @@ class DriveExtractorEngine(
     private inner class DriveJsBridge {
         @JavascriptInterface
         fun onTitleFound(title: String) {
-            if (title.isNotBlank() && extractedTitle == null) {
-                extractedTitle = title
-                onTitleExtracted?.invoke(title)
+            val clean = PdfStorageHelper.cleanDocumentTitle(title)
+            if (clean != null && extractedTitle == null) {
+                extractedTitle = clean
+                mainHandler.post {
+                    onTitleExtracted?.invoke(clean)
+                }
             }
         }
 
@@ -1562,8 +1607,8 @@ class DriveExtractorEngine(
                         captureJob?.cancel()
                         interceptedStreamCount.incrementAndGet()
 
-                        val customTitle = customTitleProvider?.invoke()?.takeIf { it.isNotBlank() }
-                        val title = customTitle ?: extractedTitle ?: "Protected_PDF_${System.currentTimeMillis()}"
+                        val customTitle = PdfStorageHelper.cleanDocumentTitle(customTitleProvider?.invoke())
+                        val title = customTitle ?: PdfStorageHelper.cleanDocumentTitle(extractedTitle) ?: "Drive_Document"
                         val safeFileName = PdfStorageHelper.generateFileName(title)
                         val savedUri = PdfStorageHelper.savePdfToDownloads(context, pdfBytes, safeFileName).getOrNull()
                         val cacheFile = PdfStorageHelper.saveToAppCache(context, pdfBytes, safeFileName)

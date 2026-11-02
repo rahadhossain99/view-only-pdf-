@@ -12,28 +12,28 @@ enum class ResolutionQuality(
     val jpegQuality: Int
 ) {
     STANDARD(
-        label = "Lite (Fast & Small)",
+        label = "Lite (Fast & Ultra Small)",
         shortTitle = "Lite • Fast",
-        sizeHint = "~1-4 MB",
-        paramSuffix = "w1100",
-        width = 1100,
-        jpegQuality = 60
+        sizeHint = "~1-2.5 MB",
+        paramSuffix = "w980",
+        width = 980,
+        jpegQuality = 56
     ),
     HIGH(
-        label = "Balanced (Recommended)",
-        shortTitle = "Balanced",
-        sizeHint = "~3-7 MB",
-        paramSuffix = "w1450",
-        width = 1450,
-        jpegQuality = 74
+        label = "Smart Compact (Recommended)",
+        shortTitle = "Smart Compact",
+        sizeHint = "~2.5-4.5 MB",
+        paramSuffix = "w1220",
+        width = 1220,
+        jpegQuality = 68
     ),
     ULTRA(
         label = "HD Print (High Detail)",
         shortTitle = "HD Print",
-        sizeHint = "~6-14 MB",
-        paramSuffix = "w2000",
-        width = 2000,
-        jpegQuality = 85
+        sizeHint = "~5-9 MB",
+        paramSuffix = "w1750",
+        width = 1750,
+        jpegQuality = 82
     )
 }
 
