@@ -49,6 +49,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.model.DownloadState
 import com.example.data.model.EngineTelemetry
@@ -69,6 +70,7 @@ import com.example.ui.theme.SketchPenBlueWash
 fun ProgressCard(
     state: DownloadState,
     documentTitle: String?,
+    knownLinkTotalPages: Int = 0,
     customFileName: String = "",
     onCustomFileNameChange: (String) -> Unit = {},
     telemetry: EngineTelemetry = EngineTelemetry(),
@@ -81,34 +83,43 @@ fun ProgressCard(
     val animatedProgress by animateFloatAsState(targetValue = progressVal, label = "SketchProgress")
     val percentInt = (progressVal * 100f).toInt().coerceIn(2, 99)
 
-    val capturedPages = maxOf(
-        telemetry.precisionScreenshotsCaptured,
-        telemetry.domTilesDiscovered,
-        if (state is DownloadState.DownloadingImages) state.current else 0,
-        if (state is DownloadState.InterceptingPages) state.capturedCount else 0,
-        if (state is DownloadState.CompilingPdf) state.currentPage else 0
-    )
+    val isCompiling = state is DownloadState.CompilingPdf
 
-    // True detected total pages (never fake 1/1 or 2/2 when total is not yet known)
+    val currentActivePage = when (state) {
+        is DownloadState.CompilingPdf -> state.currentPage
+        is DownloadState.DownloadingImages -> maxOf(
+            state.current,
+            telemetry.precisionScreenshotsCaptured,
+            telemetry.domTilesDiscovered
+        )
+        is DownloadState.InterceptingPages -> maxOf(
+            state.capturedCount,
+            telemetry.precisionScreenshotsCaptured,
+            telemetry.domTilesDiscovered
+        )
+        else -> maxOf(
+            telemetry.precisionScreenshotsCaptured,
+            telemetry.domTilesDiscovered
+        )
+    }
+
     val rawDetectedTotal = maxOf(
+        knownLinkTotalPages,
         telemetry.totalDetectedPages,
         if (state is DownloadState.DownloadingImages) state.total else 0,
         if (state is DownloadState.InterceptingPages) state.estimatedTotal else 0,
         if (state is DownloadState.CompilingPdf) state.totalPages else 0
     )
-    val confirmedTotalPages = if (rawDetectedTotal > 1) {
-        maxOf(rawDetectedTotal, capturedPages)
-    } else if (state is DownloadState.CompilingPdf && state.totalPages >= 1) {
-        state.totalPages
+
+    val confirmedTotalPages = if (rawDetectedTotal >= 1) {
+        maxOf(rawDetectedTotal, currentActivePage)
     } else {
         0
     }
 
     val displayTitle = PdfStorageHelper.cleanDocumentTitle(customFileName)
         ?: PdfStorageHelper.cleanDocumentTitle(documentTitle)
-        ?: "পিডিএফ প্রসেসিং চলছে..."
-
-    val isCompiling = state is DownloadState.CompilingPdf
+        ?: "Processing Drive PDF..."
 
     SketchCard(
         modifier = modifier
@@ -126,15 +137,15 @@ fun ProgressCard(
                 .padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // 1. Top Sketch Drawing Animation Banner (উপরে সুন্দর স্কেচ অ্যানিমেশন)
+            // 1. Top Sketch Drawing Animation Banner with Live 1..N of Total Counter
             SketchPageLoadingAnimationBanner(
-                capturedPages = capturedPages,
+                currentPage = currentActivePage,
                 confirmedTotalPages = confirmedTotalPages,
                 percentInt = percentInt,
                 isCompiling = isCompiling
             )
 
-            // 2. Document Title + Live Percentage Badge
+            // 2. Document Title + Live Percentage Stamp
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -142,27 +153,28 @@ fun ProgressCard(
             ) {
                 Column(
                     modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                    verticalArrangement = Arrangement.spacedBy(3.dp)
                 ) {
                     Text(
                         text = displayTitle,
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.ExtraBold,
                         color = SketchInkBlack,
-                        maxLines = 1
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = getDetailedStatusText(state, capturedPages, confirmedTotalPages),
+                        text = getDetailedStatusText(state, currentActivePage, confirmedTotalPages),
                         style = MaterialTheme.typography.bodySmall,
                         fontWeight = FontWeight.SemiBold,
                         color = SketchGraphite,
-                        maxLines = 2
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
                 Spacer(modifier = Modifier.width(12.dp))
 
-                // Big Sketch Percentage Stamp
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(12.dp))
@@ -181,12 +193,12 @@ fun ProgressCard(
                 }
             }
 
-            // 3. Dual Live Page Counter Cards (No 1/1 or 2/2 slashes — clean step-by-step count + total pages)
+            // 3. Clean Dual Live Page Counter Cards (Counts 1 / 50 -> 2 / 50 -> ... -> 50 / 50)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                // Left Card: Pages Loaded (1 -> 2 -> 3...)
+                // Left Card: Step-by-Step Page Progress
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -195,7 +207,7 @@ fun ProgressCard(
                         .border(1.6.dp, SketchInkBlack, RoundedCornerShape(12.dp))
                         .padding(horizontal = 12.dp, vertical = 10.dp)
                 ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(5.dp)
@@ -204,37 +216,35 @@ fun ProgressCard(
                                 imageVector = Icons.Default.Description,
                                 contentDescription = null,
                                 tint = SketchForestInk,
-                                modifier = Modifier.size(15.dp)
+                                modifier = Modifier.size(14.dp)
                             )
                             Text(
-                                text = "লোড হওয়া পেজ",
+                                text = if (isCompiling) "BINDING PAGE" else "PROCESSING PAGE",
                                 style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
+                                fontWeight = FontWeight.ExtraBold,
                                 color = SketchGraphite
                             )
                         }
                         Text(
-                            text = if (capturedPages > 0) {
-                                "$capturedPages টি পেজ"
-                            } else {
-                                "শুরু হচ্ছে..."
+                            text = when {
+                                confirmedTotalPages > 0 && currentActivePage > 0 ->
+                                    "$currentActivePage / $confirmedTotalPages"
+                                currentActivePage > 0 ->
+                                    "Page $currentActivePage"
+                                confirmedTotalPages > 0 ->
+                                    "0 / $confirmedTotalPages"
+                                else ->
+                                    "Starting..."
                             },
-                            style = MaterialTheme.typography.titleMedium,
+                            style = MaterialTheme.typography.titleLarge,
+                            fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.ExtraBold,
                             color = SketchInkBlack
-                        )
-                        Text(
-                            text = buildStepTrailText(capturedPages),
-                            style = MaterialTheme.typography.labelSmall,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                            color = SketchForestInk,
-                            maxLines = 1
                         )
                     }
                 }
 
-                // Right Card: Total Document Pages (মোট কয়টা পেজ আছে)
+                // Right Card: Total Document Pages
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -243,7 +253,7 @@ fun ProgressCard(
                         .border(1.6.dp, SketchInkBlack, RoundedCornerShape(12.dp))
                         .padding(horizontal = 12.dp, vertical = 10.dp)
                 ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(5.dp)
@@ -252,36 +262,25 @@ fun ProgressCard(
                                 imageVector = Icons.Default.AutoStories,
                                 contentDescription = null,
                                 tint = SketchPenBlue,
-                                modifier = Modifier.size(15.dp)
+                                modifier = Modifier.size(14.dp)
                             )
                             Text(
-                                text = "মোট পেজ সংখ্যা",
+                                text = "TOTAL PAGES",
                                 style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
+                                fontWeight = FontWeight.ExtraBold,
                                 color = SketchGraphite
                             )
                         }
                         Text(
                             text = if (confirmedTotalPages > 0) {
-                                "মোট $confirmedTotalPages পেজ"
+                                "$confirmedTotalPages Pages"
                             } else {
-                                "গণনা চলছে..."
+                                "Counting..."
                             },
-                            style = MaterialTheme.typography.titleMedium,
+                            style = MaterialTheme.typography.titleLarge,
+                            fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.ExtraBold,
                             color = SketchInkBlack
-                        )
-                        Text(
-                            text = if (confirmedTotalPages > 0 && capturedPages > 0) {
-                                val remaining = (confirmedTotalPages - capturedPages).coerceAtLeast(0)
-                                if (remaining == 0) "সব পেজ রেডি!" else "বাকি আছে: $remaining পেজ"
-                            } else {
-                                "ড্রাইভ পেজ স্ক্যানার"
-                            },
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = SketchPenBlue,
-                            maxLines = 1
                         )
                     }
                 }
@@ -319,12 +318,12 @@ fun ProgressCard(
                 }
             }
 
-            // 5. Action Buttons: Instant Save (if pages captured) & Cancel
+            // 5. Action Buttons: Save Now & Cancel
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                if (capturedPages > 0 && state !is DownloadState.CompilingPdf) {
+                if (currentActivePage > 0 && state !is DownloadState.CompilingPdf) {
                     Button(
                         onClick = onForceCompile,
                         shape = RoundedCornerShape(10.dp),
@@ -345,7 +344,7 @@ fun ProgressCard(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "এখনই সেভ করুন ($capturedPages পেজ)",
+                            text = "Save Now ($currentActivePage Pages)",
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.Bold
                         )
@@ -370,7 +369,7 @@ fun ProgressCard(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "বাতিল করুন",
+                        text = "Cancel",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Bold,
                         color = SketchCrimsonInk
@@ -382,13 +381,13 @@ fun ProgressCard(
 }
 
 /**
- * Custom White-Sketch Drawing Animation Banner at the top of the progress card.
+ * White-Sketch Drawing Animation Banner at the top of the progress card.
  * Shows an animated sketch page scanner beam, flying pages transferring into a bound PDF book,
- * and live page counter indicator.
+ * and a prominent live step-by-step counter (`Page 1 of 50` -> `Page 2 of 50` -> ... -> `Page 50 of 50`).
  */
 @Composable
 private fun SketchPageLoadingAnimationBanner(
-    capturedPages: Int,
+    currentPage: Int,
     confirmedTotalPages: Int,
     percentInt: Int,
     isCompiling: Boolean
@@ -418,7 +417,7 @@ private fun SketchPageLoadingAnimationBanner(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(94.dp)
+            .height(106.dp)
             .clip(RoundedCornerShape(14.dp))
             .background(SketchCreamWash.copy(alpha = 0.6f))
             .border(1.8.dp, SketchInkBlack, RoundedCornerShape(14.dp))
@@ -444,7 +443,7 @@ private fun SketchPageLoadingAnimationBanner(
             }
 
             // 2. Left Source Page Stack (Google Drive View-Only Pages)
-            val leftPageX = 24.dp.toPx()
+            val leftPageX = 22.dp.toPx()
             val pageW = 46.dp.toPx()
             val pageH = 60.dp.toPx()
             val pageY = (h - pageH) / 2f
@@ -492,7 +491,7 @@ private fun SketchPageLoadingAnimationBanner(
             )
 
             // 3. Right Destination Bound PDF Book
-            val rightBookX = w - 24.dp.toPx() - pageW
+            val rightBookX = w - 22.dp.toPx() - pageW
             drawRoundRect(
                 color = SketchInkBlack,
                 topLeft = Offset(rightBookX + 3.dp.toPx(), pageY + 3.dp.toPx()),
@@ -577,23 +576,57 @@ private fun SketchPageLoadingAnimationBanner(
             }
         }
 
-        // Center Floating Live Status Pill over the Animation
+        // Top Live Step-by-Step Counter Badge Inside the Animation (`1 / 50`, `2 / 50` ... `50 / 50`)
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 7.dp)
+                .clip(RoundedCornerShape(50))
+                .background(SketchMarkerYellow)
+                .border(1.5.dp, SketchInkBlack, RoundedCornerShape(50))
+                .padding(horizontal = 14.dp, vertical = 3.dp)
+                .testTag("animation_live_page_counter")
+        ) {
+            val topCounterText = when {
+                confirmedTotalPages > 0 && currentPage > 0 ->
+                    "Page $currentPage of $confirmedTotalPages"
+                confirmedTotalPages > 0 ->
+                    "0 of $confirmedTotalPages Pages"
+                currentPage > 0 ->
+                    "Page $currentPage"
+                else ->
+                    "Scanning Pages..."
+            }
+            Text(
+                text = topCounterText,
+                style = MaterialTheme.typography.labelMedium,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.ExtraBold,
+                color = SketchInkBlack
+            )
+        }
+
+        // Bottom Floating Live Status Pill inside the Animation
         Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 6.dp)
                 .clip(RoundedCornerShape(50))
-                .background(Color.White.copy(alpha = 0.94f))
+                .background(Color.White.copy(alpha = 0.95f))
                 .border(1.4.dp, SketchInkBlack, RoundedCornerShape(50))
                 .padding(horizontal = 12.dp, vertical = 3.dp)
         ) {
             val pillText = when {
-                isCompiling -> "পিডিএফ বাইন্ডিং চলছে • $percentInt%"
-                confirmedTotalPages > 0 && capturedPages > 0 ->
-                    "পেজ $capturedPages লোড হয়েছে • মোট $confirmedTotalPages পেজ"
-                capturedPages > 0 ->
-                    "পেজ $capturedPages লোড হয়েছে • স্ক্যান চলছে"
-                else -> "গুগল ড্রাইভ পেজ স্ক্যানার চলছে..."
+                isCompiling && confirmedTotalPages > 0 ->
+                    "Binding PDF • $currentPage / $confirmedTotalPages ($percentInt%)"
+                isCompiling ->
+                    "Binding PDF • $percentInt%"
+                confirmedTotalPages > 0 && currentPage > 0 ->
+                    "Extracting • $currentPage / $confirmedTotalPages ($percentInt%)"
+                currentPage > 0 ->
+                    "Extracting Page $currentPage • $percentInt%"
+                else ->
+                    "Connecting to Google Drive..."
             }
             Text(
                 text = pillText,
@@ -605,46 +638,41 @@ private fun SketchPageLoadingAnimationBanner(
     }
 }
 
-private fun buildStepTrailText(capturedPages: Int): String {
-    if (capturedPages <= 0) return "পেজ ১ থেকে শুরু..."
-    return when (capturedPages) {
-        1 -> "পেজ: 1"
-        2 -> "পেজ: 1 ➔ 2"
-        3 -> "পেজ: 1 ➔ 2 ➔ 3"
-        4 -> "পেজ: 1 ➔ 2 ➔ 3 ➔ 4"
-        else -> "পেজ: 1 ➔ 2 ... ➔ ${capturedPages - 1} ➔ $capturedPages"
-    }
-}
-
 private fun getDetailedStatusText(
     state: DownloadState,
-    capturedPages: Int,
+    currentPage: Int,
     confirmedTotalPages: Int
 ): String {
     return when (state) {
-        is DownloadState.LoadingWebView -> "গুগল ড্রাইভ ডকুমেন্ট ও মোট পেজ সংখ্যা স্ক্যান করা হচ্ছে..."
+        is DownloadState.LoadingWebView -> {
+            if (confirmedTotalPages > 0) {
+                "Preparing to extract all $confirmedTotalPages pages..."
+            } else {
+                "Connecting to Google Drive & counting pages..."
+            }
+        }
         is DownloadState.InterceptingPages -> {
             if (confirmedTotalPages > 0) {
-                "মোট $confirmedTotalPages টি পেজ শনাক্ত হয়েছে — পেজ লোড হচ্ছে ($capturedPages টি)..."
+                "Detected $confirmedTotalPages pages — loading page $currentPage of $confirmedTotalPages..."
             } else {
-                "পেজ শনাক্ত করা হচ্ছে — এখন পর্যন্ত $capturedPages টি পেজ পাওয়া গেছে..."
+                "Scanning document pages ($currentPage loaded)..."
             }
         }
         is DownloadState.DownloadingImages -> {
             if (confirmedTotalPages > 0) {
-                "মোট $confirmedTotalPages টি পেজের মধ্যে ${state.current} নম্বর পেজ প্রস্তুত হয়েছে..."
+                "Capturing page ${state.current} of $confirmedTotalPages..."
             } else {
-                "একের পর এক পেজ লোড হচ্ছে — পেজ ${state.current} প্রস্তুত হয়েছে..."
+                "Capturing page ${state.current}..."
             }
         }
         is DownloadState.CompilingPdf -> {
             if (state.totalPages > 0) {
-                "সবগুলো পেজ যুক্ত করে পিডিএফ তৈরি হচ্ছে (${state.currentPage} নম্বর পেজ, মোট ${state.totalPages} টি)..."
+                "Binding page ${state.currentPage} of ${state.totalPages} into PDF..."
             } else {
-                "সবগুলো পেজ যুক্ত করে পিডিএফ তৈরি হচ্ছে..."
+                "Building final PDF document..."
             }
         }
-        else -> "কাজ চলছে..."
+        else -> "Processing..."
     }
 }
 

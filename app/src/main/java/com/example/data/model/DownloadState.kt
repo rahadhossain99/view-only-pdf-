@@ -12,28 +12,28 @@ enum class ResolutionQuality(
     val jpegQuality: Int
 ) {
     STANDARD(
-        label = "Low (Fast & Small)",
+        label = "Low (1350px)",
         shortTitle = "Low",
-        sizeHint = "~1-2.5 MB",
-        paramSuffix = "w1000",
-        width = 1000,
-        jpegQuality = 58
-    ),
-    HIGH(
-        label = "Medium (Balanced)",
-        shortTitle = "Medium",
-        sizeHint = "~2.5-4.5 MB",
+        sizeHint = "1350px • ~2.5-4.5 MB",
         paramSuffix = "w1350",
         width = 1350,
-        jpegQuality = 72
+        jpegQuality = 74
     ),
-    ULTRA(
-        label = "Ultra HD (Crystal Clear)",
-        shortTitle = "Ultra HD",
-        sizeHint = "~5-9 MB",
+    HIGH(
+        label = "Medium (1850px)",
+        shortTitle = "Medium",
+        sizeHint = "1850px • ~5-8 MB",
         paramSuffix = "w1850",
         width = 1850,
         jpegQuality = 86
+    ),
+    ULTRA(
+        label = "Ultra HD (2600px)",
+        shortTitle = "Ultra HD",
+        sizeHint = "2600px • ~9-16 MB",
+        paramSuffix = "w2600",
+        width = 2600,
+        jpegQuality = 95
     )
 }
 
@@ -96,6 +96,13 @@ enum class WorkspaceTab(val label: String) {
     LIBRARY("Library")
 }
 
+data class LinkPageCountState(
+    val url: String = "",
+    val isCounting: Boolean = false,
+    val totalPages: Int = 0,
+    val documentTitle: String? = null
+)
+
 data class EngineTelemetry(
     val activeMode: ExtractionEngineMode = ExtractionEngineMode.AUTO_HYBRID,
     val activeTierName: String = "Idle",
@@ -141,7 +148,7 @@ sealed class DownloadState {
         val currentPage: Int,
         val totalPages: Int,
         val percent: Float,
-        val message: String = "Building compressed PDF..."
+        val message: String = "Building PDF..."
     ) : DownloadState()
 
     data class Success(

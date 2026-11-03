@@ -61,10 +61,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.example.data.model.DownloadState
+import com.example.ui.components.DedicatedHistoryScreen
 import com.example.ui.components.HistorySection
 import com.example.ui.components.InteractiveWebViewSheet
 import com.example.ui.components.ProgressCard
-import com.example.ui.components.SketchHistoryModalSheet
 import com.example.ui.components.SuccessCard
 import com.example.ui.components.UrlInputField
 import com.example.ui.theme.SketchCard
@@ -86,13 +86,14 @@ fun MainScreen(
     val context = LocalContext.current
     val downloadState by viewModel.downloadState.collectAsState()
     val inputUrl by viewModel.inputUrl.collectAsState()
+    val linkPageCountState by viewModel.linkPageCountState.collectAsState()
     val customFileName by viewModel.customFileName.collectAsState()
     val resolutionQuality by viewModel.resolutionQuality.collectAsState()
     val engineMode by viewModel.engineMode.collectAsState()
     val enhanceContrast by viewModel.enhanceContrast.collectAsState()
     val telemetry by viewModel.engineTelemetry.collectAsState()
     val isInteractiveMode by viewModel.isInteractiveMode.collectAsState()
-    val isHistorySheetOpen by viewModel.isHistorySheetOpen.collectAsState()
+    val isHistoryPageOpen by viewModel.isHistorySheetOpen.collectAsState()
     val historyItems by viewModel.historyItems.collectAsState()
     val documentTitle by viewModel.currentDocumentTitle.collectAsState()
     val isCompressingPdf by viewModel.isCompressingPdf.collectAsState()
@@ -120,194 +121,195 @@ fun MainScreen(
             downloadState is DownloadState.DownloadingImages ||
             downloadState is DownloadState.CompilingPdf
 
-    Scaffold(
-        modifier = modifier.fillMaxSize(),
-        containerColor = Color.Transparent,
-        contentWindowInsets = WindowInsets.safeDrawing,
-        topBar = {
-            SketchTopHeader(
-                historyCount = historyItems.size,
-                onStartNewSession = viewModel::startNewSession,
-                onOpenHistory = { viewModel.setHistorySheetOpen(true) }
-            )
-        }
-    ) { innerPadding ->
-        SketchPaperBackground(
+    Box(modifier = modifier.fillMaxSize()) {
+        // Keep the extraction WebView mounted inside visible screen bounds with near-zero alpha
+        // so Google Drive's multi-page IntersectionObserver renders & counts pages rapidly in the background.
+        AndroidView(
+            factory = { ctx ->
+                viewModel.getOrCreateExtractionWebView(ctx)
+            },
             modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-        ) {
-            // Keep the extraction WebView mounted inside visible screen bounds with near-zero alpha
-            // so Google Drive's multi-page IntersectionObserver renders all pages rapidly in the background.
-            AndroidView(
-                factory = { ctx ->
-                    viewModel.getOrCreateExtractionWebView(ctx)
-                },
-                modifier = Modifier
-                    .width(380.dp)
-                    .height(580.dp)
-                    .align(Alignment.TopCenter)
-                    .graphicsLayer { alpha = 0.01f }
-            )
+                .width(380.dp)
+                .height(580.dp)
+                .align(Alignment.TopCenter)
+                .graphicsLayer { alpha = 0.01f }
+        )
 
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .navigationBarsPadding(),
-                contentAlignment = Alignment.TopCenter
-            ) {
-                LazyColumn(
+        if (isHistoryPageOpen) {
+            // Dedicated Full-Screen History Page when user taps "History" button
+            DedicatedHistoryScreen(
+                items = historyItems,
+                onBack = { viewModel.setHistorySheetOpen(false) },
+                onOpenItem = { uri, localPath ->
+                    viewModel.openPdf(uri, localPath)
+                },
+                onOpenInFiles = { uri, localPath ->
+                    viewModel.openInFiles(uri, localPath)
+                },
+                onShareItem = { uri, localPath, title ->
+                    viewModel.sharePdf(uri, localPath, title)
+                },
+                onDeleteItem = viewModel::deleteHistoryItem,
+                onClearAll = viewModel::clearAllHistory
+            )
+        } else {
+            Scaffold(
+                modifier = Modifier.fillMaxSize(),
+                containerColor = Color.Transparent,
+                contentWindowInsets = WindowInsets.safeDrawing,
+                topBar = {
+                    SketchTopHeader(
+                        historyCount = historyItems.size,
+                        onStartNewSession = viewModel::startNewSession,
+                        onOpenHistory = { viewModel.setHistorySheetOpen(true) }
+                    )
+                }
+            ) { innerPadding ->
+                SketchPaperBackground(
                     modifier = Modifier
                         .fillMaxSize()
-                        .widthIn(max = 600.dp),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 18.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                        .padding(innerPadding)
                 ) {
-                    // 1. Main Clean Sketch Card (Link Input + Collapsible Options + Download Button)
-                    item {
-                        UrlInputField(
-                            url = inputUrl,
-                            onUrlChange = viewModel::updateUrl,
-                            customFileName = customFileName,
-                            onCustomFileNameChange = viewModel::updateCustomFileName,
-                            isLoading = isLoading,
-                            selectedResolution = resolutionQuality,
-                            onResolutionChange = viewModel::setResolution,
-                            selectedEngineMode = engineMode,
-                            onEngineModeChange = viewModel::setEngineMode,
-                            enhanceContrast = enhanceContrast,
-                            onEnhanceContrastChange = viewModel::setEnhanceContrast,
-                            onStartDownload = { viewModel.startDownload() },
-                            onToggleInteractiveMode = { viewModel.setInteractiveMode(true) },
-                            onStartNewSession = viewModel::startNewSession
-                        )
-                    }
-
-                    // 2. Live Sketch Animation, Page Counter & Progress Card
-                    item {
-                        AnimatedVisibility(
-                            visible = isLoading,
-                            enter = fadeIn(),
-                            exit = fadeOut()
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .navigationBarsPadding(),
+                        contentAlignment = Alignment.TopCenter
+                    ) {
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .widthIn(max = 600.dp),
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 18.dp),
+                            verticalArrangement = Arrangement.spacedBy(16.dp)
                         ) {
-                            ProgressCard(
-                                state = downloadState,
-                                documentTitle = documentTitle,
-                                customFileName = customFileName,
-                                onCustomFileNameChange = viewModel::updateCustomFileName,
-                                telemetry = telemetry,
-                                onCancel = viewModel::cancelDownload,
-                                onForceCompile = viewModel::forceFinishExtraction,
-                                onOpenInteractive = if (inputUrl.isNotBlank()) {
-                                    { viewModel.setInteractiveMode(true) }
-                                } else null
-                            )
-                        }
-                    }
-
-                    // 3. Completed Sketch Card (Size Compressor + Rename + Open in Files + "+ New")
-                    item {
-                        val currentSuccess = downloadState as? DownloadState.Success
-                        AnimatedVisibility(
-                            visible = currentSuccess != null,
-                            enter = fadeIn(),
-                            exit = fadeOut()
-                        ) {
-                            if (currentSuccess != null) {
-                                SuccessCard(
-                                    successState = currentSuccess,
-                                    isCompressing = isCompressingPdf,
-                                    compressionStatus = compressionStatus,
-                                    onRenamePdf = { newName ->
-                                        viewModel.renameCompletedPdf(newName)
-                                    },
-                                    onCompressPdf = { level ->
-                                        viewModel.compressCompletedPdf(level)
-                                    },
-                                    onOpenInFiles = {
-                                        viewModel.openInFiles(currentSuccess.uri, currentSuccess.localPath)
-                                    },
-                                    onOpenPdf = {
-                                        viewModel.openPdf(currentSuccess.uri, currentSuccess.localPath)
-                                    },
-                                    onSharePdf = {
-                                        viewModel.sharePdf(
-                                            currentSuccess.uri,
-                                            currentSuccess.localPath,
-                                            currentSuccess.fileName
-                                        )
-                                    },
+                            // 1. Main Clean Sketch Card (Link Input + Auto Page Count + Collapsible Options + Download Button)
+                            item {
+                                UrlInputField(
+                                    url = inputUrl,
+                                    onUrlChange = viewModel::updateUrl,
+                                    linkPageCountState = linkPageCountState,
+                                    customFileName = customFileName,
+                                    onCustomFileNameChange = viewModel::updateCustomFileName,
+                                    isLoading = isLoading,
+                                    selectedResolution = resolutionQuality,
+                                    onResolutionChange = viewModel::setResolution,
+                                    selectedEngineMode = engineMode,
+                                    onEngineModeChange = viewModel::setEngineMode,
+                                    enhanceContrast = enhanceContrast,
+                                    onEnhanceContrastChange = viewModel::setEnhanceContrast,
+                                    onStartDownload = { viewModel.startDownload() },
+                                    onToggleInteractiveMode = { viewModel.setInteractiveMode(true) },
                                     onStartNewSession = viewModel::startNewSession
                                 )
                             }
-                        }
-                    }
 
-                    // 4. Error Sketch Card (if any error occurred)
-                    item {
-                        val currentError = downloadState as? DownloadState.Error
-                        AnimatedVisibility(
-                            visible = currentError != null,
-                            enter = fadeIn(),
-                            exit = fadeOut()
-                        ) {
-                            if (currentError != null) {
-                                SketchErrorCard(
-                                    error = currentError,
-                                    onRetry = { viewModel.startDownload() },
-                                    onOpenInteractive = { viewModel.setInteractiveMode(true) }
+                            // 2. Live Sketch Animation, 1..N of Total Page Counter & Progress Card
+                            item {
+                                AnimatedVisibility(
+                                    visible = isLoading,
+                                    enter = fadeIn(),
+                                    exit = fadeOut()
+                                ) {
+                                    ProgressCard(
+                                        state = downloadState,
+                                        documentTitle = documentTitle,
+                                        knownLinkTotalPages = linkPageCountState.totalPages,
+                                        customFileName = customFileName,
+                                        onCustomFileNameChange = viewModel::updateCustomFileName,
+                                        telemetry = telemetry,
+                                        onCancel = viewModel::cancelDownload,
+                                        onForceCompile = viewModel::forceFinishExtraction,
+                                        onOpenInteractive = if (inputUrl.isNotBlank()) {
+                                            { viewModel.setInteractiveMode(true) }
+                                        } else null
+                                    )
+                                }
+                            }
+
+                            // 3. Completed Sketch Card (Size Compressor + Rename + Open in Files + "+ New")
+                            item {
+                                val currentSuccess = downloadState as? DownloadState.Success
+                                AnimatedVisibility(
+                                    visible = currentSuccess != null,
+                                    enter = fadeIn(),
+                                    exit = fadeOut()
+                                ) {
+                                    if (currentSuccess != null) {
+                                        SuccessCard(
+                                            successState = currentSuccess,
+                                            isCompressing = isCompressingPdf,
+                                            compressionStatus = compressionStatus,
+                                            onRenamePdf = { newName ->
+                                                viewModel.renameCompletedPdf(newName)
+                                            },
+                                            onCompressPdf = { level ->
+                                                viewModel.compressCompletedPdf(level)
+                                            },
+                                            onOpenInFiles = {
+                                                viewModel.openInFiles(currentSuccess.uri, currentSuccess.localPath)
+                                            },
+                                            onOpenPdf = {
+                                                viewModel.openPdf(currentSuccess.uri, currentSuccess.localPath)
+                                            },
+                                            onSharePdf = {
+                                                viewModel.sharePdf(
+                                                    currentSuccess.uri,
+                                                    currentSuccess.localPath,
+                                                    currentSuccess.fileName
+                                                )
+                                            },
+                                            onStartNewSession = viewModel::startNewSession
+                                        )
+                                    }
+                                }
+                            }
+
+                            // 4. Error Sketch Card (if any error occurred)
+                            item {
+                                val currentError = downloadState as? DownloadState.Error
+                                AnimatedVisibility(
+                                    visible = currentError != null,
+                                    enter = fadeIn(),
+                                    exit = fadeOut()
+                                ) {
+                                    if (currentError != null) {
+                                        SketchErrorCard(
+                                            error = currentError,
+                                            onRetry = { viewModel.startDownload() },
+                                            onOpenInteractive = { viewModel.setInteractiveMode(true) }
+                                        )
+                                    }
+                                }
+                            }
+
+                            // 5. Inline Bottom History Section (Shows recent PDFs right on the Home screen + opens Full History page)
+                            item {
+                                HistorySection(
+                                    items = historyItems,
+                                    onOpenItem = { uri, localPath ->
+                                        viewModel.openPdf(uri, localPath)
+                                    },
+                                    onOpenInFiles = { uri, localPath ->
+                                        viewModel.openInFiles(uri, localPath)
+                                    },
+                                    onShareItem = { uri, localPath, title ->
+                                        viewModel.sharePdf(uri, localPath, title)
+                                    },
+                                    onDeleteItem = viewModel::deleteHistoryItem,
+                                    onClearAll = viewModel::clearAllHistory,
+                                    onOpenFullHistory = { viewModel.setHistorySheetOpen(true) }
                                 )
                             }
-                        }
-                    }
 
-                    // 5. History Section (Shows created PDFs with date/time & 1-tap open)
-                    if (historyItems.isNotEmpty()) {
-                        item {
-                            HistorySection(
-                                items = historyItems,
-                                onOpenItem = { uri, localPath ->
-                                    viewModel.openPdf(uri, localPath)
-                                },
-                                onOpenInFiles = { uri, localPath ->
-                                    viewModel.openInFiles(uri, localPath)
-                                },
-                                onShareItem = { uri, localPath, title ->
-                                    viewModel.sharePdf(uri, localPath, title)
-                                },
-                                onDeleteItem = viewModel::deleteHistoryItem,
-                                onClearAll = viewModel::clearAllHistory
-                            )
+                            item {
+                                Spacer(modifier = Modifier.height(24.dp))
+                            }
                         }
-                    }
-
-                    item {
-                        Spacer(modifier = Modifier.height(24.dp))
                     }
                 }
             }
         }
-    }
-
-    // History Modal Sheet (when user taps "হিস্ট্রি" button in top bar)
-    if (isHistorySheetOpen) {
-        SketchHistoryModalSheet(
-            items = historyItems,
-            onDismiss = { viewModel.setHistorySheetOpen(false) },
-            onOpenItem = { uri, localPath ->
-                viewModel.setHistorySheetOpen(false)
-                viewModel.openPdf(uri, localPath)
-            },
-            onOpenInFiles = { uri, localPath ->
-                viewModel.setHistorySheetOpen(false)
-                viewModel.openInFiles(uri, localPath)
-            },
-            onShareItem = { uri, localPath, title ->
-                viewModel.sharePdf(uri, localPath, title)
-            },
-            onDeleteItem = viewModel::deleteHistoryItem,
-            onClearAll = viewModel::clearAllHistory
-        )
     }
 
     // Interactive Browser Sheet for Private Google Drive Sign-In
@@ -418,7 +420,7 @@ private fun SketchTopHeader(
                     }
                 }
 
-                // "হিস্ট্রি" (History) Button with count badge
+                // "History" Button that opens the separate Dedicated History Page
                 Box(
                     modifier = Modifier
                         .height(38.dp)
@@ -441,7 +443,7 @@ private fun SketchTopHeader(
                             modifier = Modifier.size(16.dp)
                         )
                         Text(
-                            text = if (historyCount > 0) "হিস্ট্রি ($historyCount)" else "হিস্ট্রি",
+                            text = if (historyCount > 0) "History ($historyCount)" else "History",
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.ExtraBold,
                             color = SketchInkBlack
@@ -481,7 +483,7 @@ private fun SketchErrorCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(18.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -532,7 +534,7 @@ private fun SketchErrorCard(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "আবার চেষ্টা করুন",
+                        text = "Retry",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.ExtraBold,
                         color = SketchInkBlack
@@ -559,7 +561,7 @@ private fun SketchErrorCard(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "ব্রাউজারে লগইন",
+                        text = "Browser Login",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.ExtraBold
                     )

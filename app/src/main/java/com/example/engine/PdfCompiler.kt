@@ -65,12 +65,13 @@ class PdfCompiler {
             val targetW = if (srcW > maxWidthPx) maxWidthPx else srcW
             val targetH = ((srcH.toFloat() / srcW.toFloat()) * targetW).toInt().coerceAtLeast(1)
 
-            val outputBitmap = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.RGB_565)
+            val outputBitmap = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(outputBitmap)
             canvas.drawColor(Color.WHITE)
 
             val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG).apply {
                 isAntiAlias = true
+                isFilterBitmap = true
                 if (enhanceContrast) {
                     colorFilter = createContrastColorFilter()
                 }
@@ -79,8 +80,8 @@ class PdfCompiler {
             val dstRect = android.graphics.Rect(0, 0, targetW, targetH)
             canvas.drawBitmap(source, null, dstRect, paint)
 
-            val baos = ByteArrayOutputStream(64 * 1024)
-            outputBitmap.compress(Bitmap.CompressFormat.JPEG, jpegQuality.coerceIn(30, 95), baos)
+            val baos = ByteArrayOutputStream(96 * 1024)
+            outputBitmap.compress(Bitmap.CompressFormat.JPEG, jpegQuality.coerceIn(30, 98), baos)
             outputBitmap.recycle()
 
             return EncodedJpegPage(
@@ -238,8 +239,8 @@ class PdfCompiler {
     suspend fun compileImageFiles(
         files: List<File>,
         enhanceContrast: Boolean = false,
-        maxWidthPx: Int = 1450,
-        jpegQuality: Int = 74,
+        maxWidthPx: Int = 1850,
+        jpegQuality: Int = 86,
         onProgress: (current: Int, total: Int) -> Unit
     ): ByteArray = withContext(Dispatchers.IO) {
         val total = files.size
@@ -249,7 +250,7 @@ class PdfCompiler {
             onProgress(index + 1, total)
             if (!file.exists()) return@forEachIndexed
 
-            // Decode with smart inSampleSize if image is overly large
+            // Decode with smart inSampleSize only if image exceeds 2x target maxWidthPx
             val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeFile(file.absolutePath, boundsOptions)
             var sampleSize = 1
@@ -259,7 +260,7 @@ class PdfCompiler {
 
             val decodeOptions = BitmapFactory.Options().apply {
                 inSampleSize = sampleSize
-                inPreferredConfig = Bitmap.Config.RGB_565
+                inPreferredConfig = Bitmap.Config.ARGB_8888
             }
             val bitmap = BitmapFactory.decodeFile(file.absolutePath, decodeOptions) ?: return@forEachIndexed
             val encoded = scaleAndCompressToJpeg(

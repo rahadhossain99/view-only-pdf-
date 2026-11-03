@@ -22,8 +22,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoStories
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.ExpandLess
@@ -33,6 +35,7 @@ import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.outlined.LockOpen
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -53,14 +56,18 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.model.ExtractionEngineMode
+import com.example.data.model.LinkPageCountState
 import com.example.data.model.ResolutionQuality
 import com.example.ui.theme.SketchCard
 import com.example.ui.theme.SketchCreamWash
+import com.example.ui.theme.SketchForestInk
 import com.example.ui.theme.SketchGraphite
 import com.example.ui.theme.SketchInkBlack
 import com.example.ui.theme.SketchMarkerYellow
+import com.example.ui.theme.SketchMintWash
 import com.example.ui.theme.SketchPenBlue
 import com.example.ui.theme.SketchPenBlueWash
 
@@ -68,6 +75,7 @@ import com.example.ui.theme.SketchPenBlueWash
 fun UrlInputField(
     url: String,
     onUrlChange: (String) -> Unit,
+    linkPageCountState: LinkPageCountState = LinkPageCountState(),
     customFileName: String = "",
     onCustomFileNameChange: (String) -> Unit = {},
     isLoading: Boolean,
@@ -80,11 +88,16 @@ fun UrlInputField(
     onStartDownload: () -> Unit,
     onToggleInteractiveMode: () -> Unit,
     onStartNewSession: () -> Unit = {},
-    onOpenScreenshotStudio: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     var showOptions by rememberSaveable { mutableStateOf(false) }
+
+    val showLinkPageBadge = url.isNotBlank() && (
+            linkPageCountState.isCounting ||
+                    linkPageCountState.totalPages > 0 ||
+                    !linkPageCountState.documentTitle.isNullOrBlank()
+            )
 
     SketchCard(
         modifier = modifier.fillMaxWidth(),
@@ -122,13 +135,13 @@ fun UrlInputField(
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "গুগল ড্রাইভ পিডিএফ লিংক",
+                        text = "Google Drive PDF Link",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.ExtraBold,
                         color = SketchInkBlack
                     )
                     Text(
-                        text = "ভিউ-অনলি লিংক পেস্ট করে এক ক্লিকে ডাউনলোড করুন",
+                        text = "Paste any view-only link to auto-count pages & download",
                         style = MaterialTheme.typography.bodySmall,
                         color = SketchGraphite
                     )
@@ -213,7 +226,113 @@ fun UrlInputField(
                 }
             )
 
-            // 3. Collapsible Options Pill (ফাইল নেম ও কোয়ালিটি অপশন: Low / Medium / Ultra HD)
+            // 3. Automatic Link Page Count & Document Title Bar (Appears as soon as link is pasted)
+            AnimatedVisibility(
+                visible = showLinkPageBadge,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(
+                            if (linkPageCountState.totalPages > 0) SketchMintWash.copy(alpha = 0.7f)
+                            else SketchCreamWash.copy(alpha = 0.6f)
+                        )
+                        .border(1.5.dp, SketchInkBlack, RoundedCornerShape(12.dp))
+                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                        .testTag("link_page_count_banner"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Description,
+                            contentDescription = null,
+                            tint = SketchInkBlack,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Column {
+                            Text(
+                                text = linkPageCountState.documentTitle ?: "Google Drive PDF Document",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = SketchInkBlack,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = if (linkPageCountState.totalPages > 0) {
+                                    "Ready to extract all ${linkPageCountState.totalPages} pages"
+                                } else {
+                                    "Scanning link for total pages..."
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = SketchGraphite,
+                                maxLines = 1
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    // Total Page Count Pill Badge
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(
+                                if (linkPageCountState.totalPages > 0) SketchMarkerYellow else Color.White
+                            )
+                            .border(1.5.dp, SketchInkBlack, RoundedCornerShape(9.dp))
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        if (linkPageCountState.totalPages > 0) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.AutoStories,
+                                    contentDescription = null,
+                                    tint = SketchInkBlack,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Text(
+                                    text = "${linkPageCountState.totalPages} Pages",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = SketchInkBlack
+                                )
+                            }
+                        } else {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    color = SketchInkBlack,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Text(
+                                    text = "Counting...",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = SketchInkBlack
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. Collapsible Options Pill (File Name & Quality: Low / Medium / Ultra HD)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -238,9 +357,9 @@ fun UrlInputField(
                     )
                     Text(
                         text = if (customFileName.isNotBlank()) {
-                            "নাম: $customFileName • কোয়ালিটি: ${selectedResolution.shortTitle}"
+                            "Name: $customFileName • Quality: ${selectedResolution.shortTitle}"
                         } else {
-                            "ফাইলের নাম ও কোয়ালিটি (${selectedResolution.shortTitle})"
+                            "File Name & Quality (${selectedResolution.shortTitle})"
                         },
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Bold,
@@ -256,7 +375,7 @@ fun UrlInputField(
                 )
             }
 
-            // Expanded Options Section (Hidden by Default for Ultra-Clean Look)
+            // Expanded Options Section
             AnimatedVisibility(
                 visible = showOptions,
                 enter = fadeIn() + expandVertically(),
@@ -284,7 +403,7 @@ fun UrlInputField(
                                 modifier = Modifier.size(15.dp)
                             )
                             Text(
-                                text = "পিডিএফ ফাইলের নাম (ঐচ্ছিক):",
+                                text = "Custom PDF File Name (Optional):",
                                 style = MaterialTheme.typography.labelMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = SketchInkBlack
@@ -299,7 +418,7 @@ fun UrlInputField(
                                 .testTag("custom_pdf_name_input"),
                             placeholder = {
                                 Text(
-                                    text = "খালি রাখলে ডকুমেন্টের আসল নাম নেবে",
+                                    text = "Leave empty to use original document title",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = SketchGraphite.copy(alpha = 0.65f)
                                 )
@@ -338,7 +457,7 @@ fun UrlInputField(
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Text(
-                            text = "পিডিএফ কোয়ালিটি ও সাইজ:",
+                            text = "Select PDF Quality & Resolution:",
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.Bold,
                             color = SketchInkBlack
@@ -400,7 +519,7 @@ fun UrlInputField(
                 }
             }
 
-            // 4. Primary Sketch Download Button
+            // 5. Primary Sketch Download Button
             Button(
                 onClick = onStartDownload,
                 enabled = url.isNotBlank() && !isLoading,
@@ -423,14 +542,19 @@ fun UrlInputField(
                     modifier = Modifier.size(20.dp)
                 )
                 Spacer(modifier = Modifier.width(8.dp))
+                val buttonText = when {
+                    isLoading -> "Processing PDF..."
+                    linkPageCountState.totalPages > 0 -> "Download PDF (${linkPageCountState.totalPages} Pages)"
+                    else -> "Download PDF"
+                }
                 Text(
-                    text = if (isLoading) "পিডিএফ তৈরি হচ্ছে..." else "পিডিএফ ডাউনলোড করুন",
+                    text = buttonText,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.ExtraBold
                 )
             }
 
-            // 5. Minimal Private Link Helper
+            // 6. Minimal Private Link Sign-In Helper
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -451,7 +575,7 @@ fun UrlInputField(
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = "প্রাইভেট ফাইল বা লগইন প্রয়োজন হলে এখানে ট্যাপ করুন",
+                    text = "Private file? Tap here to sign in via Browser Preview",
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.SemiBold,
                     color = SketchInkBlack

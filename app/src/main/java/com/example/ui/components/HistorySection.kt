@@ -1,6 +1,7 @@
 package com.example.ui.components
 
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -10,32 +11,34 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.AccessTime
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,150 +60,246 @@ import com.example.ui.theme.SketchGraphite
 import com.example.ui.theme.SketchInkBlack
 import com.example.ui.theme.SketchMarkerYellow
 import com.example.ui.theme.SketchMintWash
+import com.example.ui.theme.SketchPaperBackground
+import com.example.ui.theme.SketchPenBlueWash
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * Dedicated full-screen History Page opened when the user clicks the History button.
+ */
 @Composable
-fun SketchHistoryModalSheet(
+fun DedicatedHistoryScreen(
     items: List<DownloadHistoryItem>,
-    onDismiss: () -> Unit,
+    onBack: () -> Unit,
     onOpenItem: (Uri, String?) -> Unit,
     onOpenInFiles: (Uri, String?) -> Unit,
     onShareItem: (Uri, String?, String) -> Unit,
     onDeleteItem: (String) -> Unit,
-    onClearAll: () -> Unit
+    onClearAll: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    BackHandler(onBack = onBack)
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = Color.White,
-        dragHandle = null
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(horizontal = 16.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            // Sheet Header
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+    val totalPagesSaved = items.sumOf { it.pageCount }
+
+    Scaffold(
+        modifier = modifier
+            .fillMaxSize()
+            .testTag("dedicated_history_screen"),
+        containerColor = Color.Transparent,
+        contentWindowInsets = WindowInsets.safeDrawing,
+        topBar = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color.White)
+                    .statusBarsPadding()
             ) {
                 Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(38.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(SketchMarkerYellow)
-                            .border(1.8.dp, SketchInkBlack, RoundedCornerShape(10.dp)),
-                        contentAlignment = Alignment.Center
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.weight(1f)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.History,
-                            contentDescription = "History",
-                            tint = SketchInkBlack,
-                            modifier = Modifier.size(20.dp)
-                        )
+                        Box(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(SketchCreamWash)
+                                .border(1.8.dp, SketchInkBlack, RoundedCornerShape(10.dp))
+                                .clickable { onBack() }
+                                .testTag("history_back_button"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back to Home",
+                                tint = SketchInkBlack,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        Column {
+                            Text(
+                                text = "Download History",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = SketchInkBlack
+                            )
+                            Text(
+                                text = "${items.size} PDFs • $totalPagesSaved total pages",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = SketchGraphite
+                            )
+                        }
                     }
-                    Column {
-                        Text(
-                            text = "ডাউনলোড হিস্ট্রি (${items.size})",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = SketchInkBlack
-                        )
-                        Text(
-                            text = "কবে কোন ফাইল তৈরি করা হয়েছে — ট্যাপ করে ওপেন করুন",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = SketchGraphite
-                        )
-                    }
-                }
 
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
                     if (items.isNotEmpty()) {
                         Box(
                             modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
+                                .height(36.dp)
+                                .clip(RoundedCornerShape(10.dp))
                                 .background(SketchCoralWash)
-                                .border(1.3.dp, SketchInkBlack, RoundedCornerShape(8.dp))
+                                .border(1.5.dp, SketchInkBlack, RoundedCornerShape(10.dp))
                                 .clickable { onClearAll() }
-                                .padding(horizontal = 10.dp, vertical = 6.dp)
-                                .testTag("sheet_clear_history_button")
+                                .padding(horizontal = 12.dp)
+                                .testTag("page_clear_history_button"),
+                            contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                text = "সব মুছুন",
-                                style = MaterialTheme.typography.labelSmall,
+                                text = "Clear All",
+                                style = MaterialTheme.typography.labelMedium,
                                 fontWeight = FontWeight.ExtraBold,
                                 color = SketchCrimsonInk
                             )
                         }
                     }
-
-                    IconButton(
-                        onClick = onDismiss,
-                        modifier = Modifier
-                            .size(34.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(SketchCreamWash)
-                            .border(1.4.dp, SketchInkBlack, RoundedCornerShape(8.dp))
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "Close History",
-                            tint = SketchInkBlack,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
                 }
-            }
 
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(2.dp)
-                    .background(SketchInkBlack)
-            )
-
-            if (items.isEmpty()) {
-                EmptyHistorySketchBox()
-            } else {
-                LazyColumn(
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(max = 520.dp),
-                    contentPadding = PaddingValues(vertical = 4.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                        .height(2.dp)
+                        .background(SketchInkBlack)
+                )
+            }
+        }
+    ) { innerPadding ->
+        SketchPaperBackground(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .navigationBarsPadding(),
+                contentAlignment = Alignment.TopCenter
+            ) {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .widthIn(max = 600.dp),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    items(items, key = { it.id }) { item ->
-                        SketchHistoryItemCard(
-                            item = item,
-                            onOpen = {
-                                onOpenItem(Uri.parse(item.uriString), item.localPath)
-                            },
-                            onOpenInFiles = {
-                                onOpenInFiles(Uri.parse(item.uriString), item.localPath)
-                            },
-                            onShare = {
-                                onShareItem(Uri.parse(item.uriString), item.localPath, item.title)
-                            },
-                            onDelete = {
-                                onDeleteItem(item.id)
+                    // Summary Banner
+                    if (items.isNotEmpty()) {
+                        item {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(SketchMintWash.copy(alpha = 0.7f))
+                                        .border(1.6.dp, SketchInkBlack, RoundedCornerShape(12.dp))
+                                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                                ) {
+                                    Column {
+                                        Text(
+                                            text = "SAVED PDFS",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = SketchGraphite
+                                        )
+                                        Text(
+                                            text = "${items.size} Files",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = SketchInkBlack
+                                        )
+                                    }
+                                }
+
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(SketchPenBlueWash.copy(alpha = 0.6f))
+                                        .border(1.6.dp, SketchInkBlack, RoundedCornerShape(12.dp))
+                                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                                ) {
+                                    Column {
+                                        Text(
+                                            text = "TOTAL PAGES",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = SketchGraphite
+                                        )
+                                        Text(
+                                            text = "$totalPagesSaved Pages",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = SketchInkBlack
+                                        )
+                                    }
+                                }
                             }
-                        )
+                        }
+                    }
+
+                    if (items.isEmpty()) {
+                        item {
+                            SketchCard(
+                                modifier = Modifier.fillMaxWidth(),
+                                containerColor = Color.White,
+                                borderColor = SketchInkBlack,
+                                shadowColor = SketchInkBlack,
+                                cornerRadius = 18.dp,
+                                shadowOffset = 4.dp
+                            ) {
+                                Box(modifier = Modifier.padding(16.dp)) {
+                                    EmptyHistorySketchBox()
+                                }
+                            }
+                        }
+                    } else {
+                        items(items, key = { it.id }) { item ->
+                            SketchCard(
+                                modifier = Modifier.fillMaxWidth(),
+                                containerColor = Color.White,
+                                borderColor = SketchInkBlack,
+                                shadowColor = SketchInkBlack,
+                                cornerRadius = 16.dp,
+                                shadowOffset = 3.dp
+                            ) {
+                                Box(modifier = Modifier.padding(2.dp)) {
+                                    SketchHistoryItemCard(
+                                        item = item,
+                                        containerBackground = Color.White,
+                                        showBorder = false,
+                                        onOpen = {
+                                            onOpenItem(Uri.parse(item.uriString), item.localPath)
+                                        },
+                                        onOpenInFiles = {
+                                            onOpenInFiles(Uri.parse(item.uriString), item.localPath)
+                                        },
+                                        onShare = {
+                                            onShareItem(Uri.parse(item.uriString), item.localPath, item.title)
+                                        },
+                                        onDelete = {
+                                            onDeleteItem(item.id)
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    item {
+                        Spacer(modifier = Modifier.height(24.dp))
                     }
                 }
             }
@@ -208,6 +307,9 @@ fun SketchHistoryModalSheet(
     }
 }
 
+/**
+ * Inline History Preview Section displayed right at the bottom of the Home Screen.
+ */
 @Composable
 fun HistorySection(
     items: List<DownloadHistoryItem>,
@@ -216,8 +318,11 @@ fun HistorySection(
     onShareItem: (Uri, String?, String) -> Unit,
     onDeleteItem: (String) -> Unit,
     onClearAll: () -> Unit,
+    onOpenFullHistory: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val recentPreviewItems = items.take(4)
+
     SketchCard(
         modifier = modifier
             .fillMaxWidth()
@@ -241,53 +346,64 @@ fun HistorySection(
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.weight(1f)
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(32.dp)
-                            .clip(RoundedCornerShape(8.dp))
+                            .size(34.dp)
+                            .clip(RoundedCornerShape(9.dp))
                             .background(SketchMarkerYellow)
-                            .border(1.5.dp, SketchInkBlack, RoundedCornerShape(8.dp)),
+                            .border(1.5.dp, SketchInkBlack, RoundedCornerShape(9.dp)),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = Icons.Default.History,
                             contentDescription = "History",
                             tint = SketchInkBlack,
-                            modifier = Modifier.size(17.dp)
+                            modifier = Modifier.size(18.dp)
                         )
                     }
                     Column {
                         Text(
-                            text = "ডাউনলোড হিস্ট্রি (${items.size})",
+                            text = if (items.isNotEmpty()) "Recent Downloads (${items.size})" else "Recent Downloads",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.ExtraBold,
                             color = SketchInkBlack
                         )
                         Text(
-                            text = "যেকোনো ফাইলে ক্লিক করে সরাসরি ওপেন করুন",
+                            text = "Tap any PDF to open or view full history",
                             style = MaterialTheme.typography.labelSmall,
                             color = SketchGraphite
                         )
                     }
                 }
 
-                if (items.isNotEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(SketchCoralWash)
-                            .border(1.2.dp, SketchInkBlack, RoundedCornerShape(8.dp))
-                            .clickable { onClearAll() }
-                            .padding(horizontal = 10.dp, vertical = 5.dp)
-                            .testTag("clear_history_button")
+                // "View All" button to open the dedicated History Page
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(9.dp))
+                        .background(SketchCreamWash)
+                        .border(1.4.dp, SketchInkBlack, RoundedCornerShape(9.dp))
+                        .clickable { onOpenFullHistory() }
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                        .testTag("inline_view_all_history_button")
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         Text(
-                            text = "সব মুছুন",
+                            text = "Full History",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.ExtraBold,
-                            color = SketchCrimsonInk
+                            color = SketchInkBlack
+                        )
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                            contentDescription = "Open Full History Page",
+                            tint = SketchInkBlack,
+                            modifier = Modifier.size(13.dp)
                         )
                     }
                 }
@@ -300,7 +416,7 @@ fun HistorySection(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    items.forEach { item ->
+                    recentPreviewItems.forEach { item ->
                         SketchHistoryItemCard(
                             item = item,
                             onOpen = {
@@ -316,6 +432,26 @@ fun HistorySection(
                                 onDeleteItem(item.id)
                             }
                         )
+                    }
+
+                    if (items.size > 4) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(SketchMarkerYellow.copy(alpha = 0.6f))
+                                .border(1.4.dp, SketchInkBlack, RoundedCornerShape(10.dp))
+                                .clickable { onOpenFullHistory() }
+                                .padding(vertical = 10.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "View All ${items.size} Downloaded PDFs →",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = SketchInkBlack
+                            )
+                        }
                     }
                 }
             }
@@ -345,14 +481,14 @@ private fun EmptyHistorySketchBox() {
                 modifier = Modifier.size(30.dp)
             )
             Text(
-                text = "এখনও কোনো পিডিএফ হিস্ট্রিতে নেই",
+                text = "No PDFs in History Yet",
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.ExtraBold,
                 color = SketchInkBlack,
                 textAlign = TextAlign.Center
             )
             Text(
-                text = "পিডিএফ তৈরি করলেই কবে ও কখন করা হয়েছে তার তালিকা এখানে জমা থাকবে",
+                text = "Downloaded Google Drive PDFs will appear here for quick access",
                 style = MaterialTheme.typography.labelSmall,
                 color = SketchGraphite,
                 textAlign = TextAlign.Center
@@ -364,6 +500,8 @@ private fun EmptyHistorySketchBox() {
 @Composable
 private fun SketchHistoryItemCard(
     item: DownloadHistoryItem,
+    containerBackground: Color = SketchCreamWash.copy(alpha = 0.35f),
+    showBorder: Boolean = true,
     onOpen: () -> Unit,
     onOpenInFiles: () -> Unit,
     onShare: () -> Unit,
@@ -376,8 +514,11 @@ private fun SketchHistoryItemCard(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(SketchCreamWash.copy(alpha = 0.35f))
-            .border(1.6.dp, SketchInkBlack, RoundedCornerShape(12.dp))
+            .background(containerBackground)
+            .then(
+                if (showBorder) Modifier.border(1.6.dp, SketchInkBlack, RoundedCornerShape(12.dp))
+                else Modifier
+            )
             .clickable { onOpen() }
             .padding(12.dp)
             .testTag("history_item_${item.id}"),
@@ -445,7 +586,7 @@ private fun SketchHistoryItemCard(
                     .padding(horizontal = 8.dp, vertical = 4.dp)
             ) {
                 Text(
-                    text = "${item.pageCount} পেজ • ${PdfStorageHelper.formatFileSize(item.fileSizeBytes)}",
+                    text = "${item.pageCount}p • ${PdfStorageHelper.formatFileSize(item.fileSizeBytes)}",
                     style = MaterialTheme.typography.labelSmall,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.ExtraBold,
@@ -454,13 +595,12 @@ private fun SketchHistoryItemCard(
             }
         }
 
-        // Quick Action Row: Open PDF, Open in Files, Share, Delete
+        // Quick Action Row: Open, Files, Share, Delete
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Open PDF directly
             Box(
                 modifier = Modifier
                     .weight(1.2f)
@@ -481,7 +621,7 @@ private fun SketchHistoryItemCard(
                         modifier = Modifier.size(14.dp)
                     )
                     Text(
-                        text = "ওপেন করুন",
+                        text = "Open",
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.ExtraBold,
                         color = Color.White
@@ -489,7 +629,6 @@ private fun SketchHistoryItemCard(
                 }
             }
 
-            // Open in Files
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -511,7 +650,7 @@ private fun SketchHistoryItemCard(
                         modifier = Modifier.size(14.dp)
                     )
                     Text(
-                        text = "ফাইলস",
+                        text = "Files",
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.ExtraBold,
                         color = SketchInkBlack
@@ -519,7 +658,6 @@ private fun SketchHistoryItemCard(
                 }
             }
 
-            // Share PDF
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(8.dp))
@@ -537,7 +675,6 @@ private fun SketchHistoryItemCard(
                 )
             }
 
-            // Delete from History
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(8.dp))

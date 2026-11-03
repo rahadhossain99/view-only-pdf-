@@ -130,7 +130,7 @@ fun SuccessCard(
 
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "পিডিএফ তৈরি সম্পন্ন (100%)",
+                        text = "PDF Ready (100%)",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.ExtraBold,
                         color = SketchInkBlack
@@ -166,7 +166,7 @@ fun SuccessCard(
                             modifier = Modifier.size(15.dp)
                         )
                         Text(
-                            text = "রিনেম",
+                            text = "Rename",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.ExtraBold,
                             color = SketchInkBlack
@@ -181,22 +181,22 @@ fun SuccessCard(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 SketchBadge(
-                    text = "${successState.pageCount} পেজ",
+                    text = "${successState.pageCount} Pages",
                     backgroundColor = SketchCreamWash
                 )
                 SketchBadge(
-                    text = "সাইজ: ${PdfStorageHelper.formatFileSize(successState.fileSizeBytes)}",
+                    text = "Size: ${PdfStorageHelper.formatFileSize(successState.fileSizeBytes)}",
                     backgroundColor = SketchMarkerYellow
                 )
                 if (successState.previousSizeBytes != null && successState.previousSizeBytes > successState.fileSizeBytes) {
                     SketchBadge(
-                        text = "আগে: ${PdfStorageHelper.formatFileSize(successState.previousSizeBytes)}",
+                        text = "Was: ${PdfStorageHelper.formatFileSize(successState.previousSizeBytes)}",
                         backgroundColor = SketchMintWash
                     )
                 }
             }
 
-            // 3. Collapsible PDF Rename Box (When user taps 'রিনেম')
+            // 3. Collapsible PDF Rename Box
             AnimatedVisibility(
                 visible = showRenameBox,
                 enter = fadeIn() + expandVertically(),
@@ -220,7 +220,7 @@ fun SuccessCard(
                             .testTag("rename_pdf_input"),
                         placeholder = {
                             Text(
-                                text = "নতুন নাম লিখুন...",
+                                text = "Enter new file name...",
                                 style = MaterialTheme.typography.bodySmall
                             )
                         },
@@ -262,7 +262,7 @@ fun SuccessCard(
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "সেভ",
+                            text = "Save",
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.ExtraBold
                         )
@@ -270,7 +270,7 @@ fun SuccessCard(
                 }
             }
 
-            // 4. Post-Download 1-Tap PDF Size Reducer (সাইজ কমানোর অপশন)
+            // 4. Post-Download 1-Tap PDF Size Reducer
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -292,13 +292,13 @@ fun SuccessCard(
                     )
                     Column {
                         Text(
-                            text = "পিডিএফ সাইজ কমান (Reduce File Size)",
+                            text = "Reduce File Size",
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.ExtraBold,
                             color = SketchInkBlack
                         )
                         Text(
-                            text = "সাইজ আরও ছোট করতে এক ট্যাপে কম্প্রেস করুন:",
+                            text = "Tap any preset below to compress this PDF:",
                             style = MaterialTheme.typography.labelSmall,
                             color = SketchGraphite
                         )
@@ -319,7 +319,7 @@ fun SuccessCard(
                             modifier = Modifier.size(20.dp)
                         )
                         Text(
-                            text = compressionStatus ?: "পিডিএফ সাইজ কমানো হচ্ছে...",
+                            text = compressionStatus ?: "Compressing PDF...",
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.Bold,
                             color = SketchInkBlack
@@ -377,7 +377,7 @@ fun SuccessCard(
                 }
             }
 
-            // 5. Primary Action: Open in Files / Downloads App
+            // 5. Primary Action: Open in Files
             Button(
                 onClick = onOpenInFiles,
                 shape = RoundedCornerShape(12.dp),
@@ -398,13 +398,13 @@ fun SuccessCard(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "ফাইলস-এ দেখুন (Open in Files)",
+                    text = "Open in Files",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.ExtraBold
                 )
             }
 
-            // 6. Secondary Row: Open PDF Directly & Share
+            // 6. Secondary Row: Open PDF & Share
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -427,7 +427,7 @@ fun SuccessCard(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "পিডিএফ পড়ুন",
+                        text = "Open PDF",
                         style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.ExtraBold,
                         color = SketchInkBlack
@@ -452,7 +452,7 @@ fun SuccessCard(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "শেয়ার করুন",
+                        text = "Share",
                         style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.ExtraBold,
                         color = SketchInkBlack
@@ -460,7 +460,7 @@ fun SuccessCard(
                 }
             }
 
-            // 7. "+ New" Button to clear everything and start fresh
+            // 7. "+ New PDF" Button
             OutlinedButton(
                 onClick = onStartNewSession,
                 shape = RoundedCornerShape(10.dp),
@@ -472,7 +472,7 @@ fun SuccessCard(
                     .testTag("success_new_session_button")
             ) {
                 Text(
-                    text = "+ New (সব ক্লিয়ার করে নতুন পিডিএফ তৈরি করুন)",
+                    text = "+ Create New PDF",
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.ExtraBold,
                     color = SketchInkBlack

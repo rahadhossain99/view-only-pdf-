@@ -256,6 +256,81 @@ class DriveExtractorEngine(
                 "$highRes?$pageParam"
             }
         }
+
+        /**
+         * Fast HTTP check on Google Drive preview/view HTML to extract document title
+         * and any embedded page count metadata before or alongside WebView DOM inspection.
+         */
+        suspend fun probeLinkInfoViaHttp(
+            rawUrl: String,
+            client: OkHttpClient
+        ): Pair<String?, Int> = withContext(Dispatchers.IO) {
+            var detectedTitle: String? = null
+            var detectedPages = 0
+            try {
+                val previewUrl = sanitizeDriveUrl(rawUrl)
+                if (previewUrl.isBlank()) return@withContext Pair(null, 0)
+
+                val cookie = try {
+                    CookieManager.getInstance().getCookie(previewUrl)
+                        ?: CookieManager.getInstance().getCookie("https://drive.google.com")
+                } catch (_: Exception) {
+                    null
+                }
+
+                val reqBuilder = Request.Builder()
+                    .url(previewUrl)
+                    .addHeader("User-Agent", DESKTOP_USER_AGENT)
+                    .addHeader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                if (!cookie.isNullOrBlank()) {
+                    reqBuilder.addHeader("Cookie", cookie)
+                }
+
+                client.newCall(reqBuilder.build()).execute().use { response ->
+                    val contentType = response.header("Content-Type") ?: ""
+                    if (contentType.contains("application/pdf", ignoreCase = true)) {
+                        return@withContext Pair(null, 0)
+                    }
+                    val html = response.body?.string() ?: ""
+                    if (html.isNotEmpty()) {
+                        // 1. Extract Title from og:title or <title>
+                        val ogMatch = Regex("""<meta\s+property=["']og:title["']\s+content=["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(html)
+                            ?: Regex("""<meta\s+ itemprop=["']name["']\s+content=["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(html)
+                            ?: Regex("""<title>([^<]+)</title>""", RegexOption.IGNORE_CASE).find(html)
+                        if (ogMatch != null) {
+                            val rawTitle = ogMatch.groupValues[1]
+                                .replace("&#39;", "'")
+                                .replace("&quot;", "\"")
+                                .replace("&amp;", "&")
+                            detectedTitle = PdfStorageHelper.cleanDocumentTitle(rawTitle)
+                        }
+
+                        // 2. Extract page count from Drive viewer config JSON in HTML
+                        val pagePatterns = listOf(
+                            Regex(""""numPages"\s*:\s*(\d+)"""),
+                            Regex("""\\x22numPages\\x22\s*:\s*(\d+)"""),
+                            Regex("""\\"numPages\\"\s*:\s*(\d+)"""),
+                            Regex(""""pageCount"\s*:\s*(\d+)"""),
+                            Regex("""\\x22pageCount\\x22\s*:\s*(\d+)"""),
+                            Regex(""""pages"\s*:\s*(\d+)"""),
+                            Regex("""\bPage\s+1\s+of\s+(\d+)\b""", RegexOption.IGNORE_CASE)
+                        )
+                        for (pat in pagePatterns) {
+                            val m = pat.find(html)
+                            if (m != null) {
+                                val count = m.groupValues[1].toIntOrNull() ?: 0
+                                if (count in 1..3000) {
+                                    detectedPages = maxOf(detectedPages, count)
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "HTTP link metadata probe note: ${e.message}")
+            }
+            Pair(detectedTitle, detectedPages)
+        }
     }
 
     private fun emitTelemetry(activeTier: String, message: String) {
@@ -274,13 +349,106 @@ class DriveExtractorEngine(
         }
     }
 
+    /**
+     * Automatically loads the link in the hidden WebView and reads the exact total page count
+     * and document title as soon as the user pastes or enters a Google Drive link.
+     */
+    @SuppressLint("SetJavaScriptEnabled")
+    fun probeLinkTotalPagesInWebView(
+        url: String,
+        wv: WebView,
+        onProgress: (title: String?, totalPages: Int, finished: Boolean) -> Unit
+    ): Job {
+        val targetUrl = sanitizeDriveUrl(url)
+        return scope.launch(Dispatchers.Main) {
+            if (targetUrl.isBlank()) {
+                onProgress(null, 0, true)
+                return@launch
+            }
+            var bestTitle: String? = null
+            var bestTotal = 0
+            val pageFinishedDeferred = CompletableDeferred<Boolean>()
+
+            try {
+                with(wv.settings) {
+                    javaScriptEnabled = true
+                    domStorageEnabled = true
+                    databaseEnabled = true
+                    loadsImagesAutomatically = true
+                    mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                    userAgentString = DESKTOP_USER_AGENT
+                    useWideViewPort = true
+                    loadWithOverviewMode = true
+                }
+                CookieManager.getInstance().setAcceptCookie(true)
+                CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
+
+                if (wv.width <= 0 || wv.height <= 0) {
+                    wv.measure(
+                        android.view.View.MeasureSpec.makeMeasureSpec(1200, android.view.View.MeasureSpec.EXACTLY),
+                        android.view.View.MeasureSpec.makeMeasureSpec(1800, android.view.View.MeasureSpec.EXACTLY)
+                    )
+                    wv.layout(0, 0, 1200, 1800)
+                }
+
+                wv.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, loadedUrl: String?) {
+                        super.onPageFinished(view, loadedUrl)
+                        injectPageScraperAndCaptureScript(view)
+                        if (!pageFinishedDeferred.isCompleted) {
+                            pageFinishedDeferred.complete(true)
+                        }
+                    }
+                }
+
+                wv.loadUrl(targetUrl)
+
+                // Wait up to 4.5s for initial page finish or start polling
+                var waitTicks = 0
+                while (!pageFinishedDeferred.isCompleted && waitTicks < 15) {
+                    delay(300)
+                    waitTicks++
+                }
+                injectPageScraperAndCaptureScript(wv)
+
+                // Poll DOM & viewer badges for total page count and title
+                for (attempt in 0 until 14) {
+                    delay(350)
+                    injectPageScraperAndCaptureScript(wv)
+                    val scrapedTitle = queryDocumentTitle(wv)
+                    if (!scrapedTitle.isNullOrBlank()) {
+                        bestTitle = scrapedTitle
+                    }
+                    val count = queryTotalCount(wv)
+                    if (count > bestTotal) {
+                        bestTotal = count
+                    }
+                    if (bestTotal > 0 || bestTitle != null) {
+                        onProgress(bestTitle, bestTotal, false)
+                    }
+                    // Once we have a confirmed multi-page count (or stable count after 4 checks), finish early
+                    if (bestTotal > 1 && attempt >= 2) {
+                        break
+                    }
+                    if (bestTotal == 1 && attempt >= 5) {
+                        break
+                    }
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "WebView link probe note: ${e.message}")
+            }
+            onProgress(bestTitle, bestTotal, true)
+        }
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     fun startExtraction(
         url: String,
         resolution: ResolutionQuality = ResolutionQuality.ULTRA,
         engineMode: ExtractionEngineMode = ExtractionEngineMode.AUTO_HYBRID,
         contrastEnhance: Boolean = false,
-        existingWebView: WebView? = null
+        existingWebView: WebView? = null,
+        initialKnownTotalPages: Int = 0
     ) {
         currentResolution = resolution
         currentEngineMode = engineMode
@@ -288,7 +456,7 @@ class DriveExtractorEngine(
         extractedTitle = null
         isExtracting = true
         rawPdfSaved.set(false)
-        totalDetectedPages = 0
+        totalDetectedPages = initialKnownTotalPages.coerceAtLeast(0)
         firstInterceptedTemplateUrl = null
         capturedPagesMap.clear()
         capturedUrlsSet.clear()
@@ -318,12 +486,22 @@ class DriveExtractorEngine(
                 activeWebView = wv
 
                 if (existingWebView == null || wv.width <= 0 || wv.height <= 0) {
+                    val targetViewportW = when (currentResolution) {
+                        ResolutionQuality.ULTRA -> 1600
+                        ResolutionQuality.HIGH -> 1350
+                        ResolutionQuality.STANDARD -> 1080
+                    }
+                    val targetViewportH = when (currentResolution) {
+                        ResolutionQuality.ULTRA -> 2400
+                        ResolutionQuality.HIGH -> 2000
+                        ResolutionQuality.STANDARD -> 1600
+                    }
                     try {
                         wv.measure(
-                            android.view.View.MeasureSpec.makeMeasureSpec(1080, android.view.View.MeasureSpec.EXACTLY),
-                            android.view.View.MeasureSpec.makeMeasureSpec(1600, android.view.View.MeasureSpec.EXACTLY)
+                            android.view.View.MeasureSpec.makeMeasureSpec(targetViewportW, android.view.View.MeasureSpec.EXACTLY),
+                            android.view.View.MeasureSpec.makeMeasureSpec(targetViewportH, android.view.View.MeasureSpec.EXACTLY)
                         )
-                        wv.layout(0, 0, 1080, 1600)
+                        wv.layout(0, 0, targetViewportW, targetViewportH)
                     } catch (e: Exception) {
                         Log.d(TAG, "Layout measurement: ${e.message}")
                     }
@@ -878,7 +1056,7 @@ class DriveExtractorEngine(
                                 ? pageEl
                                 : (pageEl.querySelector ? pageEl.querySelector('canvas') : null);
                             if (canvas && canvas.width > 150 && canvas.height > 150) {
-                                var cUrl = canvas.toDataURL('image/jpeg', 0.94);
+                                var cUrl = canvas.toDataURL('image/jpeg', 0.98);
                                 if (cUrl && cUrl.length > 2000) {
                                     return cUrl.split(',')[1] || "";
                                 }
@@ -894,7 +1072,7 @@ class DriveExtractorEngine(
                                 ctx.fillStyle = '#FFFFFF';
                                 ctx.fillRect(0, 0, offCanvas.width, offCanvas.height);
                                 ctx.drawImage(img, 0, 0, offCanvas.width, offCanvas.height);
-                                var iUrl = offCanvas.toDataURL('image/jpeg', 0.94);
+                                var iUrl = offCanvas.toDataURL('image/jpeg', 0.98);
                                 if (iUrl && iUrl.length > 2000) {
                                     return iUrl.split(',')[1] || "";
                                 }
@@ -1067,9 +1245,9 @@ class DriveExtractorEngine(
                     }
 
                     val statusMsg = if (totalDetectedPages > 1) {
-                        "পেজ $pageDisplay লোড হয়েছে (মোট $totalDetectedPages পেজ)"
+                        "Loaded page $pageDisplay of $totalDetectedPages"
                     } else {
-                        "পেজ $pageDisplay লোড হয়েছে..."
+                        "Loaded page $pageDisplay..."
                     }
                     onStatusUpdate?.invoke(statusMsg)
                     onPageCaptured?.invoke(pageDisplay, totalDetectedPages, statusMsg)
@@ -1152,7 +1330,7 @@ class DriveExtractorEngine(
                 onExtractionCompleted?.invoke(pagesList, extractedTitle, pagesList.firstOrNull())
             } else {
                 DownloadNotificationHelper.cancelProgress(context)
-                onError?.invoke("পেজ ডাউনলোড করা যায়নি। লিংকটি প্রাইভেট হলে উপরের ব্রাউজার আইকনে ট্যাপ করে লগইন করুন।")
+                onError?.invoke("Could not extract pages. If the link is private, tap Sign In below to open in browser.")
             }
         }
     }
@@ -1163,7 +1341,15 @@ class DriveExtractorEngine(
      */
     private suspend fun downloadPageImageToFile(rawImgUrl: String, outFile: File): Boolean = withContext(Dispatchers.IO) {
         val highResUrl = upgradeImageUrlResolution(rawImgUrl, currentResolution)
-        val candidates = if (highResUrl != rawImgUrl) listOf(highResUrl, rawImgUrl) else listOf(rawImgUrl)
+        val candidates = LinkedHashSet<String>().apply {
+            add(highResUrl)
+            if (currentResolution == ResolutionQuality.ULTRA) {
+                // If Drive's endpoint caps w=2600 for a specific file, fallback to w=2200 then w=1850 before rawImgUrl
+                add(upgradeImageUrlResolution(rawImgUrl, ResolutionQuality.HIGH).replace("1850", "2200"))
+                add(upgradeImageUrlResolution(rawImgUrl, ResolutionQuality.HIGH))
+            }
+            add(rawImgUrl)
+        }
 
         for (candidateUrl in candidates) {
             try {
@@ -1185,8 +1371,10 @@ class DriveExtractorEngine(
                         if (bytes != null && bytes.size > 1500) {
                             val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                             if (bmp != null && bmp.width > 120 && bmp.height > 120) {
+                                // Save intermediate cache file at 100% quality to prevent double JPEG re-compression artifacts;
+                                // PdfCompiler performs the single final target resolution & quality pass.
                                 FileOutputStream(outFile).use { out ->
-                                    bmp.compress(Bitmap.CompressFormat.JPEG, currentResolution.jpegQuality, out)
+                                    bmp.compress(Bitmap.CompressFormat.JPEG, 100, out)
                                     out.flush()
                                 }
                                 bmp.recycle()
@@ -1337,7 +1525,7 @@ class DriveExtractorEngine(
                     val bytes = Base64.decode(base64Str, Base64.DEFAULT)
                     val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return@withContext false
                     FileOutputStream(outFile).use { out ->
-                        bmp.compress(Bitmap.CompressFormat.JPEG, currentResolution.jpegQuality, out)
+                        bmp.compress(Bitmap.CompressFormat.JPEG, 100, out)
                         out.flush()
                     }
                     bmp.recycle()
@@ -1435,7 +1623,7 @@ class DriveExtractorEngine(
             }
 
             FileOutputStream(outputFile).use { out ->
-                cropBitmap.compress(Bitmap.CompressFormat.JPEG, currentResolution.jpegQuality, out)
+                cropBitmap.compress(Bitmap.CompressFormat.JPEG, 100, out)
                 out.flush()
             }
 
@@ -1458,7 +1646,7 @@ class DriveExtractorEngine(
                     ?: "Drive_Document"
 
                 withContext(Dispatchers.Main) {
-                    val msg = "কম্প্যাক্ট পিডিএফ তৈরি হচ্ছে (${files.size} পেজ)..."
+                    val msg = "Building PDF (${files.size} pages)..."
                     onStatusUpdate?.invoke(msg)
                     emitTelemetry("PDF Compiler", msg)
                     onCompilingPdf?.invoke(1, files.size, 0.86f, msg)
@@ -1485,13 +1673,13 @@ class DriveExtractorEngine(
                             current,
                             total,
                             smoothOverallFraction,
-                            "পিডিএফ বাইন্ডিং চলছে — পেজ $current (মোট $total পেজ)"
+                            "Binding PDF — Page $current of $total"
                         )
                         DownloadNotificationHelper.showProgress(
                             context = context,
                             docName = resolvedTitle,
                             percent = overallPercent,
-                            detailText = "পিডিএফ বাইন্ডিং চলছে — পেজ $current (মোট $total পেজ)"
+                            detailText = "Binding PDF — Page $current of $total"
                         )
                     }
                 }
