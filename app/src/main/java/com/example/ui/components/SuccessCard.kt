@@ -74,6 +74,7 @@ fun SuccessCard(
     onOpenInFiles: () -> Unit = {},
     onOpenPdf: () -> Unit,
     onSharePdf: () -> Unit,
+    onStartNewSession: () -> Unit = {},
     onOpenInStudio: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
@@ -457,6 +458,25 @@ fun SuccessCard(
                         color = SketchInkBlack
                     )
                 }
+            }
+
+            // 7. "+ New" Button to clear everything and start fresh
+            OutlinedButton(
+                onClick = onStartNewSession,
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(44.dp)
+                    .background(SketchCreamWash.copy(alpha = 0.6f), RoundedCornerShape(10.dp))
+                    .border(1.5.dp, SketchInkBlack, RoundedCornerShape(10.dp))
+                    .testTag("success_new_session_button")
+            ) {
+                Text(
+                    text = "+ New (সব ক্লিয়ার করে নতুন পিডিএফ তৈরি করুন)",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = SketchInkBlack
+                )
             }
         }
     }

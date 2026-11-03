@@ -79,6 +79,7 @@ fun UrlInputField(
     onEnhanceContrastChange: (Boolean) -> Unit = {},
     onStartDownload: () -> Unit,
     onToggleInteractiveMode: () -> Unit,
+    onStartNewSession: () -> Unit = {},
     onOpenScreenshotStudio: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -99,7 +100,7 @@ fun UrlInputField(
                 .padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // 1. Clean Sketch Header
+            // 1. Clean Sketch Header + Quick "+ New" Reset
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -131,6 +132,26 @@ fun UrlInputField(
                         style = MaterialTheme.typography.bodySmall,
                         color = SketchGraphite
                     )
+                }
+
+                if (url.isNotBlank() || customFileName.isNotBlank()) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(SketchCreamWash)
+                            .border(1.4.dp, SketchInkBlack, RoundedCornerShape(10.dp))
+                            .clickable { onStartNewSession() }
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                            .testTag("card_new_reset_button"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "+ New",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = SketchInkBlack
+                        )
+                    }
                 }
             }
 
@@ -192,7 +213,7 @@ fun UrlInputField(
                 }
             )
 
-            // 3. Collapsible Options Pill (ফাইল নেম ও কোয়ালিটি অপশন)
+            // 3. Collapsible Options Pill (ফাইল নেম ও কোয়ালিটি অপশন: Low / Medium / Ultra HD)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -217,9 +238,9 @@ fun UrlInputField(
                     )
                     Text(
                         text = if (customFileName.isNotBlank()) {
-                            "নাম: $customFileName • ${selectedResolution.shortTitle}"
+                            "নাম: $customFileName • কোয়ালিটি: ${selectedResolution.shortTitle}"
                         } else {
-                            "ফাইলের নাম ও কোয়ালিটি অপশন (ঐচ্ছিক)"
+                            "ফাইলের নাম ও কোয়ালিটি (${selectedResolution.shortTitle})"
                         },
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Bold,

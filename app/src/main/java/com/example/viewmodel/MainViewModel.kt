@@ -76,6 +76,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isInteractiveMode = MutableStateFlow(false)
     val isInteractiveMode: StateFlow<Boolean> = _isInteractiveMode.asStateFlow()
 
+    private val _isHistorySheetOpen = MutableStateFlow(false)
+    val isHistorySheetOpen: StateFlow<Boolean> = _isHistorySheetOpen.asStateFlow()
+
     private val _isScreenshotStudioOpen = MutableStateFlow(false)
     val isScreenshotStudioOpen: StateFlow<Boolean> = _isScreenshotStudioOpen.asStateFlow()
 
@@ -164,12 +167,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _isInteractiveMode.value = enabled
     }
 
+    fun setHistorySheetOpen(open: Boolean) {
+        if (open) {
+            historyRepository.loadHistory()
+        }
+        _isHistorySheetOpen.value = open
+    }
+
     fun setScreenshotStudioOpen(open: Boolean) {
         _isScreenshotStudioOpen.value = open
     }
 
     fun clearStudioExportMessage() {
         _studioExportMessage.value = null
+    }
+
+    /**
+     * Clears everything (URL, custom file name, progress/completed cards, telemetry)
+     * when the user clicks the "+ New" (+ নতুন) button.
+     */
+    fun startNewSession() {
+        cancelDownload()
+        _inputUrl.value = ""
+        _customFileName.value = ""
+        _currentDocumentTitle.value = null
+        _discoveredPages.value = emptyList()
+        _compressionStatus.value = null
+        _isCompressingPdf.value = false
+        _engineTelemetry.value = EngineTelemetry(activeMode = _engineMode.value)
+        _downloadState.value = DownloadState.Idle
+        try {
+            attachedExtractionWebView?.loadUrl("about:blank")
+        } catch (_: Exception) {}
     }
 
     fun startDownload(rawUrl: String = _inputUrl.value) {
@@ -322,11 +351,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         engine.onPageCaptured = { pageNum, total, msg ->
-            val safeTotal = total.coerceAtLeast(pageNum).coerceAtLeast(1)
-            val pct = ((pageNum.toFloat() / safeTotal.toFloat()) * 0.85f).coerceIn(0.05f, 0.85f)
+            val denom = if (total >= pageNum && total > 1) {
+                total
+            } else {
+                (pageNum + 3).coerceAtLeast(4)
+            }
+            val pct = ((pageNum.toFloat() / denom.toFloat()) * 0.85f).coerceIn(0.05f, 0.85f)
             _downloadState.value = DownloadState.DownloadingImages(
                 current = pageNum,
-                total = safeTotal,
+                total = if (total > 1) total else 0,
                 percent = pct,
                 message = msg
             )
@@ -342,7 +375,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         engine.onPdfReady = { uri, fileName, pageCount, fileSizeBytes, localPath ->
-            val cleanBaseName = fileName.removeSuffix(".pdf")
+            val cleanBaseName = PdfStorageHelper.cleanDocumentTitle(fileName.removeSuffix(".pdf"))
+                ?: fileName.removeSuffix(".pdf")
+            historyRepository.addHistoryItem(
+                DownloadHistoryItem(
+                    title = cleanBaseName,
+                    uriString = uri.toString(),
+                    pageCount = pageCount,
+                    fileSizeBytes = fileSizeBytes,
+                    localPath = localPath,
+                    timestamp = System.currentTimeMillis()
+                )
+            )
             _downloadState.value = DownloadState.Success(
                 uri = uri,
                 fileName = fileName,
@@ -476,6 +520,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 uri = newUri,
                 fileName = newFileName
             )
+            historyRepository.addHistoryItem(
+                DownloadHistoryItem(
+                    title = newFileName.removeSuffix(".pdf"),
+                    uriString = newUri.toString(),
+                    pageCount = currentState.pageCount,
+                    fileSizeBytes = currentState.fileSizeBytes,
+                    localPath = currentState.localPath,
+                    timestamp = System.currentTimeMillis()
+                )
+            )
             _compressionStatus.value = "নাম পরিবর্তন করে '$newFileName' রাখা হয়েছে"
             DownloadNotificationHelper.showCompleted(
                 context = context,
@@ -517,7 +571,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     level = level
                 ) { page, total ->
                     val pct = ((page.toFloat() / total.coerceAtLeast(1)) * 100f).toInt().coerceIn(1, 99)
-                    _compressionStatus.value = "পেজ $page/$total অপ্টিমাইজ হচ্ছে ($pct%)..."
+                    _compressionStatus.value = "পেজ $page (মোট $total) অপ্টিমাইজ হচ্ছে ($pct%)..."
                 }
 
                 if (compressedBytes.isNotEmpty()) {
@@ -540,6 +594,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         fileSizeBytes = newSize,
                         localPath = cacheFile.absolutePath,
                         previousSizeBytes = originalBytesSize
+                    )
+
+                    historyRepository.addHistoryItem(
+                        DownloadHistoryItem(
+                            title = finalFileName.removeSuffix(".pdf"),
+                            uriString = finalUri.toString(),
+                            pageCount = currentState.pageCount,
+                            fileSizeBytes = newSize,
+                            localPath = cacheFile.absolutePath,
+                            timestamp = System.currentTimeMillis()
+                        )
                     )
 
                     val oldFormatted = PdfStorageHelper.formatFileSize(originalBytesSize)

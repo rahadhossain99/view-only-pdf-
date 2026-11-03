@@ -10,6 +10,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,16 +31,16 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Draw
 import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
@@ -60,8 +61,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.example.data.model.DownloadState
+import com.example.ui.components.HistorySection
 import com.example.ui.components.InteractiveWebViewSheet
 import com.example.ui.components.ProgressCard
+import com.example.ui.components.SketchHistoryModalSheet
 import com.example.ui.components.SuccessCard
 import com.example.ui.components.UrlInputField
 import com.example.ui.theme.SketchCard
@@ -89,6 +92,8 @@ fun MainScreen(
     val enhanceContrast by viewModel.enhanceContrast.collectAsState()
     val telemetry by viewModel.engineTelemetry.collectAsState()
     val isInteractiveMode by viewModel.isInteractiveMode.collectAsState()
+    val isHistorySheetOpen by viewModel.isHistorySheetOpen.collectAsState()
+    val historyItems by viewModel.historyItems.collectAsState()
     val documentTitle by viewModel.currentDocumentTitle.collectAsState()
     val isCompressingPdf by viewModel.isCompressingPdf.collectAsState()
     val compressionStatus by viewModel.compressionStatus.collectAsState()
@@ -121,11 +126,9 @@ fun MainScreen(
         contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
             SketchTopHeader(
-                onOpenFilesApp = {
-                    val success = downloadState as? DownloadState.Success
-                    viewModel.openInFiles(success?.uri ?: android.net.Uri.EMPTY, success?.localPath)
-                },
-                onOpenBrowserSignIn = { viewModel.setInteractiveMode(true) }
+                historyCount = historyItems.size,
+                onStartNewSession = viewModel::startNewSession,
+                onOpenHistory = { viewModel.setHistorySheetOpen(true) }
             )
         }
     ) { innerPadding ->
@@ -175,11 +178,12 @@ fun MainScreen(
                             enhanceContrast = enhanceContrast,
                             onEnhanceContrastChange = viewModel::setEnhanceContrast,
                             onStartDownload = { viewModel.startDownload() },
-                            onToggleInteractiveMode = { viewModel.setInteractiveMode(true) }
+                            onToggleInteractiveMode = { viewModel.setInteractiveMode(true) },
+                            onStartNewSession = viewModel::startNewSession
                         )
                     }
 
-                    // 2. Live Percentage & Progress Sketch Card
+                    // 2. Live Sketch Animation, Page Counter & Progress Card
                     item {
                         AnimatedVisibility(
                             visible = isLoading,
@@ -201,7 +205,7 @@ fun MainScreen(
                         }
                     }
 
-                    // 3. Completed Sketch Card (Size Compressor + Rename + Open in Files)
+                    // 3. Completed Sketch Card (Size Compressor + Rename + Open in Files + "+ New")
                     item {
                         val currentSuccess = downloadState as? DownloadState.Success
                         AnimatedVisibility(
@@ -232,7 +236,8 @@ fun MainScreen(
                                             currentSuccess.localPath,
                                             currentSuccess.fileName
                                         )
-                                    }
+                                    },
+                                    onStartNewSession = viewModel::startNewSession
                                 )
                             }
                         }
@@ -256,12 +261,53 @@ fun MainScreen(
                         }
                     }
 
+                    // 5. History Section (Shows created PDFs with date/time & 1-tap open)
+                    if (historyItems.isNotEmpty()) {
+                        item {
+                            HistorySection(
+                                items = historyItems,
+                                onOpenItem = { uri, localPath ->
+                                    viewModel.openPdf(uri, localPath)
+                                },
+                                onOpenInFiles = { uri, localPath ->
+                                    viewModel.openInFiles(uri, localPath)
+                                },
+                                onShareItem = { uri, localPath, title ->
+                                    viewModel.sharePdf(uri, localPath, title)
+                                },
+                                onDeleteItem = viewModel::deleteHistoryItem,
+                                onClearAll = viewModel::clearAllHistory
+                            )
+                        }
+                    }
+
                     item {
                         Spacer(modifier = Modifier.height(24.dp))
                     }
                 }
             }
         }
+    }
+
+    // History Modal Sheet (when user taps "হিস্ট্রি" button in top bar)
+    if (isHistorySheetOpen) {
+        SketchHistoryModalSheet(
+            items = historyItems,
+            onDismiss = { viewModel.setHistorySheetOpen(false) },
+            onOpenItem = { uri, localPath ->
+                viewModel.setHistorySheetOpen(false)
+                viewModel.openPdf(uri, localPath)
+            },
+            onOpenInFiles = { uri, localPath ->
+                viewModel.setHistorySheetOpen(false)
+                viewModel.openInFiles(uri, localPath)
+            },
+            onShareItem = { uri, localPath, title ->
+                viewModel.sharePdf(uri, localPath, title)
+            },
+            onDeleteItem = viewModel::deleteHistoryItem,
+            onClearAll = viewModel::clearAllHistory
+        )
     }
 
     // Interactive Browser Sheet for Private Google Drive Sign-In
@@ -283,8 +329,9 @@ fun MainScreen(
 
 @Composable
 private fun SketchTopHeader(
-    onOpenFilesApp: () -> Unit,
-    onOpenBrowserSignIn: () -> Unit
+    historyCount: Int,
+    onStartNewSession: () -> Unit,
+    onOpenHistory: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -295,18 +342,18 @@ private fun SketchTopHeader(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
+                .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(9.dp),
                 modifier = Modifier.weight(1f)
             ) {
                 Box(
                     modifier = Modifier
-                        .size(40.dp)
+                        .size(38.dp)
                         .clip(RoundedCornerShape(10.dp))
                         .background(SketchMarkerYellow)
                         .border(2.dp, SketchInkBlack, RoundedCornerShape(10.dp)),
@@ -316,7 +363,7 @@ private fun SketchTopHeader(
                         imageVector = Icons.Default.Draw,
                         contentDescription = "Sketch PDF Logo",
                         tint = SketchInkBlack,
-                        modifier = Modifier.size(21.dp)
+                        modifier = Modifier.size(20.dp)
                     )
                 }
                 Column {
@@ -340,38 +387,66 @@ private fun SketchTopHeader(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                IconButton(
-                    onClick = onOpenFilesApp,
+                // "+ New" Button to clear everything and start fresh
+                Box(
                     modifier = Modifier
-                        .size(40.dp)
+                        .height(38.dp)
                         .clip(RoundedCornerShape(10.dp))
-                        .background(SketchCreamWash)
-                        .border(1.5.dp, SketchInkBlack, RoundedCornerShape(10.dp))
-                        .testTag("top_open_files_button")
+                        .background(SketchMarkerYellow)
+                        .border(1.6.dp, SketchInkBlack, RoundedCornerShape(10.dp))
+                        .clickable { onStartNewSession() }
+                        .padding(horizontal = 11.dp)
+                        .testTag("top_new_session_button"),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.FolderOpen,
-                        contentDescription = "Open Downloads in Files",
-                        tint = SketchInkBlack,
-                        modifier = Modifier.size(20.dp)
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Add,
+                            contentDescription = "New PDF",
+                            tint = SketchInkBlack,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = "New",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = SketchInkBlack
+                        )
+                    }
                 }
 
-                IconButton(
-                    onClick = onOpenBrowserSignIn,
+                // "হিস্ট্রি" (History) Button with count badge
+                Box(
                     modifier = Modifier
-                        .size(40.dp)
+                        .height(38.dp)
                         .clip(RoundedCornerShape(10.dp))
-                        .background(Color.White)
-                        .border(1.5.dp, SketchInkBlack, RoundedCornerShape(10.dp))
-                        .testTag("top_interactive_browser_button")
+                        .background(SketchCreamWash)
+                        .border(1.6.dp, SketchInkBlack, RoundedCornerShape(10.dp))
+                        .clickable { onOpenHistory() }
+                        .padding(horizontal = 11.dp)
+                        .testTag("top_history_button"),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        imageVector = Icons.Outlined.Visibility,
-                        contentDescription = "Browser Sign-In",
-                        tint = SketchInkBlack,
-                        modifier = Modifier.size(20.dp)
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.History,
+                            contentDescription = "History",
+                            tint = SketchInkBlack,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = if (historyCount > 0) "হিস্ট্রি ($historyCount)" else "হিস্ট্রি",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = SketchInkBlack
+                        )
+                    }
                 }
             }
         }
@@ -406,7 +481,7 @@ private fun SketchErrorCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+                verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,

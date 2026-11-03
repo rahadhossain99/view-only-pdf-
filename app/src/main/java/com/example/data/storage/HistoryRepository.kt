@@ -12,35 +12,43 @@ import org.json.JSONObject
 class HistoryRepository(context: Context) {
 
     private val prefs: SharedPreferences =
-        context.getSharedPreferences("pdf_download_history_prefs", Context.MODE_PRIVATE)
+        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    private val _historyFlow = MutableStateFlow<List<DownloadHistoryItem>>(emptyList())
-    val historyFlow: StateFlow<List<DownloadHistoryItem>> = _historyFlow.asStateFlow()
+    val historyFlow: StateFlow<List<DownloadHistoryItem>> = sharedHistoryFlow.asStateFlow()
 
     init {
-        loadHistory()
+        if (!isLoaded) {
+            loadHistory()
+            isLoaded = true
+        }
     }
 
-    private fun loadHistory() {
-        val rawJson = prefs.getString(KEY_HISTORY, null) ?: return
+    fun loadHistory() {
+        val rawJson = prefs.getString(KEY_HISTORY, null)
+        if (rawJson.isNullOrBlank()) {
+            sharedHistoryFlow.value = emptyList()
+            return
+        }
         val list = mutableListOf<DownloadHistoryItem>()
         try {
             val jsonArray = JSONArray(rawJson)
             for (i in 0 until jsonArray.length()) {
                 val obj = jsonArray.getJSONObject(i)
+                val rawTitle = obj.optString("title", "Drive PDF")
+                val cleanTitle = PdfStorageHelper.cleanDocumentTitle(rawTitle) ?: rawTitle
                 list.add(
                     DownloadHistoryItem(
                         id = obj.getString("id"),
-                        title = obj.getString("title"),
+                        title = cleanTitle,
                         uriString = obj.getString("uriString"),
                         pageCount = obj.getInt("pageCount"),
                         fileSizeBytes = obj.getLong("fileSizeBytes"),
-                        localPath = obj.optString("localPath", null),
+                        localPath = obj.optString("localPath", "").takeIf { it.isNotBlank() },
                         timestamp = obj.getLong("timestamp")
                     )
                 )
             }
-            _historyFlow.value = list
+            sharedHistoryFlow.value = list
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -48,24 +56,34 @@ class HistoryRepository(context: Context) {
 
     fun addHistoryItem(item: DownloadHistoryItem) = addItem(item)
 
+    @Synchronized
     fun addItem(item: DownloadHistoryItem) {
-        val currentList = _historyFlow.value.toMutableList()
-        currentList.removeAll { it.id == item.id }
-        currentList.add(0, item)
-        val trimmed = currentList.take(50)
-        _historyFlow.value = trimmed
+        val cleanTitle = PdfStorageHelper.cleanDocumentTitle(item.title) ?: item.title
+        val normalizedItem = item.copy(title = cleanTitle)
+
+        val currentList = sharedHistoryFlow.value.toMutableList()
+        currentList.removeAll { existing ->
+            existing.id == normalizedItem.id ||
+                    (normalizedItem.localPath != null && existing.localPath == normalizedItem.localPath) ||
+                    existing.uriString == normalizedItem.uriString
+        }
+        currentList.add(0, normalizedItem)
+        val trimmed = currentList.take(100)
+        sharedHistoryFlow.value = trimmed
         saveHistory(trimmed)
     }
 
+    @Synchronized
     fun removeItem(id: String) {
-        val currentList = _historyFlow.value.toMutableList()
+        val currentList = sharedHistoryFlow.value.toMutableList()
         currentList.removeAll { it.id == id }
-        _historyFlow.value = currentList
+        sharedHistoryFlow.value = currentList
         saveHistory(currentList)
     }
 
+    @Synchronized
     fun clearAll() {
-        _historyFlow.value = emptyList()
+        sharedHistoryFlow.value = emptyList()
         prefs.edit().remove(KEY_HISTORY).apply()
     }
 
@@ -78,7 +96,7 @@ class HistoryRepository(context: Context) {
                 put("uriString", item.uriString)
                 put("pageCount", item.pageCount)
                 put("fileSizeBytes", item.fileSizeBytes)
-                put("localPath", item.localPath)
+                put("localPath", item.localPath ?: "")
                 put("timestamp", item.timestamp)
             }
             jsonArray.put(obj)
@@ -87,6 +105,11 @@ class HistoryRepository(context: Context) {
     }
 
     companion object {
+        private const val PREFS_NAME = "pdf_download_history_prefs"
         private const val KEY_HISTORY = "saved_downloads_history"
+
+        private val sharedHistoryFlow = MutableStateFlow<List<DownloadHistoryItem>>(emptyList())
+        @Volatile
+        private var isLoaded = false
     }
 }

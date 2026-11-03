@@ -266,7 +266,7 @@ class DriveExtractorEngine(
             canvasHooksCaptured = canvasHookCount.get(),
             domTilesDiscovered = domTileCount.get(),
             precisionScreenshotsCaptured = precisionScreenshotCount.get(),
-            totalDetectedPages = totalDetectedPages.coerceAtLeast(capturedPageFiles.size).coerceAtLeast(1),
+            totalDetectedPages = totalDetectedPages,
             lastLogMessage = message
         )
         mainHandler.post {
@@ -641,27 +641,36 @@ class DriveExtractorEngine(
                         var bestTextTotal = 0;
 
                         try {
-                            // Check aria-labels first
+                            // 1. Check Google Drive's dedicated total-page badge element (.ndfHFb-c4YZDc-DARUcf-NnAfwf-i5oIFb)
+                            var driveTotalEl = document.querySelector('.ndfHFb-c4YZDc-DARUcf-NnAfwf-i5oIFb, #numPages');
+                            if (driveTotalEl && driveTotalEl.textContent) {
+                                var directNum = parseInt(driveTotalEl.textContent.replace(/[^0-9]/g, ''), 10);
+                                if (directNum > bestTextTotal && directNum < 3000) {
+                                    bestTextTotal = directNum;
+                                }
+                            }
+
+                            // 2. Check aria-labels
                             var ariaNodes = document.querySelectorAll('[aria-label]');
                             for (var a = 0; a < ariaNodes.length; a++) {
                                 var lbl = ariaNodes[a].getAttribute('aria-label') || '';
                                 var ma = /(?:Page\s+\d+\s*(?:of|\/)\s*|of\s+)(\d+)/i.exec(lbl);
                                 if (ma && ma[1]) {
                                     var parsedA = parseInt(ma[1], 10);
-                                    if (parsedA > bestTextTotal && parsedA < 2000) bestTextTotal = parsedA;
+                                    if (parsedA > bestTextTotal && parsedA < 3000) bestTextTotal = parsedA;
                                 }
                             }
 
-                            // Check textContent of toolbar / page counter nodes
-                            var nodes = document.querySelectorAll('.ndfHFb-c4YZDc-j7LFlb, .ndfHFb-c4YZDc-to915-LgbsSe, #numPages, .drive-viewer-toolstrip, span, div');
+                            // 3. Check textContent of toolbar / page counter nodes
+                            var nodes = document.querySelectorAll('.ndfHFb-c4YZDc-DARUcf-NnAfwf-tJHJj, .ndfHFb-c4YZDc-j7LFlb, .ndfHFb-c4YZDc-to915-LgbsSe, #numPages, .drive-viewer-toolstrip, span, div');
                             for (var i = 0; i < nodes.length; i++) {
-                                if (nodes[i].children && nodes[i].children.length > 3) continue;
+                                if (nodes[i].children && nodes[i].children.length > 4) continue;
                                 var txt = (nodes[i].textContent || "").trim();
                                 if (txt.length === 0 || txt.length > 45) continue;
                                 var m1 = /(?:Page\s*\d+\s*(?:of|\/)\s*|\b\d+\s+of\s+|\b\d+\s*\/\s*)(\d+)\b/i.exec(txt);
                                 if (m1 && m1[1]) {
                                     var cnt = parseInt(m1[1], 10);
-                                    if (cnt > bestTextTotal && cnt < 2000) {
+                                    if (cnt > bestTextTotal && cnt < 3000) {
                                         bestTextTotal = cnt;
                                     }
                                 }
@@ -1050,35 +1059,46 @@ class DriveExtractorEngine(
                     capturedPageFiles.add(tempFile)
 
                     val latestDomPages = inspection?.domPageCount ?: 0
-                    val effectiveTotal = maxOf(totalDetectedPages, latestDomPages, capturedPageFiles.size)
-                    if (effectiveTotal > totalDetectedPages) {
-                        totalDetectedPages = effectiveTotal
+                    val latestTextTotal = inspection?.textTotalCount ?: 0
+                    val discoveredTotal = maxOf(totalDetectedPages, latestDomPages, latestTextTotal)
+                    if (discoveredTotal > totalDetectedPages) {
+                        totalDetectedPages = discoveredTotal
+                        onTotalPagesDetected?.invoke(totalDetectedPages)
                     }
 
-                    val statusMsg = "পেজ $pageDisplay / $effectiveTotal ডাউনলোড হয়েছে..."
+                    val statusMsg = if (totalDetectedPages > 1) {
+                        "পেজ $pageDisplay লোড হয়েছে (মোট $totalDetectedPages পেজ)"
+                    } else {
+                        "পেজ $pageDisplay লোড হয়েছে..."
+                    }
                     onStatusUpdate?.invoke(statusMsg)
-                    onPageCaptured?.invoke(pageDisplay, effectiveTotal, statusMsg)
+                    onPageCaptured?.invoke(pageDisplay, totalDetectedPages, statusMsg)
 
                     val activeDocName = PdfStorageHelper.cleanDocumentTitle(customTitleProvider?.invoke())
                         ?: extractedTitle
                         ?: "Drive PDF"
-                    val livePercent = ((pageDisplay.toFloat() / effectiveTotal.coerceAtLeast(1).toFloat()) * 84f)
+                    val denom = if (totalDetectedPages >= pageDisplay && totalDetectedPages > 1) {
+                        totalDetectedPages
+                    } else {
+                        (pageDisplay + 3).coerceAtLeast(4)
+                    }
+                    val livePercent = ((pageDisplay.toFloat() / denom.toFloat()) * 84f)
                         .toInt().coerceIn(5, 84)
                     DownloadNotificationHelper.showProgress(
                         context = context,
                         docName = activeDocName,
                         percent = livePercent,
-                        detailText = "পেজ $pageDisplay / $effectiveTotal প্রস্তুত হয়েছে"
+                        detailText = statusMsg
                     )
 
                     emitTelemetry(
                         "Fast Page Extractor",
-                        "Captured full page $pageDisplay of $effectiveTotal"
+                        statusMsg
                     )
 
                     // Stop immediately once we have captured all known pages so it never hangs at the end!
-                    if (effectiveTotal >= 2 && capturedPageFiles.size >= effectiveTotal) {
-                        Log.d(TAG, "Captured all $effectiveTotal pages! Proceeding immediately to PDF build.")
+                    if (totalDetectedPages >= 2 && capturedPageFiles.size >= totalDetectedPages) {
+                        Log.d(TAG, "Captured all $totalDetectedPages pages! Proceeding immediately to PDF build.")
                         break
                     } else if (latestDomPages <= 1 && totalDetectedPages <= 1) {
                         val sHeight = inspection?.scrollHeight ?: 0
@@ -1465,13 +1485,13 @@ class DriveExtractorEngine(
                             current,
                             total,
                             smoothOverallFraction,
-                            "পিডিএফ বাইন্ডিং চলছে: পেজ $current / $total..."
+                            "পিডিএফ বাইন্ডিং চলছে — পেজ $current (মোট $total পেজ)"
                         )
                         DownloadNotificationHelper.showProgress(
                             context = context,
                             docName = resolvedTitle,
                             percent = overallPercent,
-                            detailText = "পিডিএফ বাইন্ডিং চলছে ($current/$total)..."
+                            detailText = "পিডিএফ বাইন্ডিং চলছে — পেজ $current (মোট $total পেজ)"
                         )
                     }
                 }
